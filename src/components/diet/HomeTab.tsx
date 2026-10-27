@@ -5,6 +5,7 @@ import { useDiet } from "@/context/DietContext";
 import { fromDateKey, shiftDateKey, toLocalDateKey } from "@/lib/diet";
 import { SummaryCard } from "./SummaryCard";
 import { MealAccordion } from "./MealAccordion";
+import { WaterCard } from "./WaterCard";
 import { ExerciseCard } from "./ExerciseCard";
 import { WeightCard } from "./WeightCard";
 
@@ -35,6 +36,7 @@ export function HomeTab() {
       </div>
       <SummaryCard />
       <MealAccordion />
+      <WaterCard />
       <ExerciseCard />
       <WeightCard />
     </div>

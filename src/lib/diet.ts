@@ -30,6 +30,70 @@ export interface FoodEntry {
 export interface ExerciseEntry { id: string; date: string; name: string; kcal: number }
 export interface WeightEntry { date: string; weight: number }
 
+export interface UserSession {
+  userId: string;
+  userName: string;
+}
+
+export interface StoredAuthUser {
+  userId: string;
+  userName: string;
+  salt: string;
+  passwordHash: string;
+  createdAt: string;
+  // V1 레거시 평문 비밀번호 호환 필드 (마이그레이션 대상)
+  password?: string;
+}
+
+export interface DailyLogData {
+  date: string;
+  steps?: number | undefined;
+  waterMl?: number | undefined;
+  targetWaterMl?: number | undefined;
+  foods: FoodEntry[];
+  exercises: ExerciseEntry[];
+  weight?: number | undefined;
+}
+
+// V1 구형 데이터 마이그레이션용 인터페이스
+export interface LegacyMealItem {
+  id?: string | undefined;
+  type: MealType;
+  name: string;
+  calories: number;
+  carbs?: number | undefined;
+  protein?: number | undefined;
+  fat?: number | undefined;
+  imageUrl?: string | undefined;
+}
+
+export interface LegacyDailyLog {
+  date: string;
+  userId?: string | undefined;
+  targetCalories?: number | undefined;
+  steps?: number | undefined;
+  meals?: LegacyMealItem[] | undefined;
+  waterIntake?: number | undefined;
+  water?: number | undefined;
+  weight?: number | undefined;
+  exerciseCalories?: number | undefined;
+  exerciseNotes?: string | undefined;
+}
+
+export interface LegacyUserProfile {
+  birthDate?: string | undefined;
+  gender?: 'male' | 'female' | undefined;
+  height?: number | undefined;
+  weight?: number | undefined;
+  activityLevel?: 'sedentary' | 'light' | 'moderate' | 'active' | 'very_active' | undefined;
+  targetWeight?: number | undefined;
+  targetCalories?: number | undefined;
+  targetWater?: number | undefined;
+  geminiApiKey?: string | undefined;
+}
+
+export const DEFAULT_TARGET_WATER = 2000;
+
 export const DEFAULT_PROFILE: Profile = {
   nickname: "민다이어터",
   gender: "male",

@@ -3,9 +3,10 @@ import { useDiet } from "@/context/DietContext";
 import { sumFoods } from "@/lib/diet";
 
 export function SummaryCard() {
-  const { foods, exercises, selectedDate, targetKcal, macros } = useDiet();
+  const { foods, exercises, selectedDate, targetKcal, macros, stepCalories } = useDiet();
   const today = sumFoods(foods.filter((f) => f.date === selectedDate));
-  const burned = exercises.filter((e) => e.date === selectedDate).reduce((a, e) => a + e.kcal, 0);
+  const exerciseBurned = exercises.filter((e) => e.date === selectedDate).reduce((a, e) => a + e.kcal, 0);
+  const burned = exerciseBurned + (stepCalories || 0);
   const intake = Math.round(today.kcal);
   const net = intake - burned;
   const over = net > targetKcal;
