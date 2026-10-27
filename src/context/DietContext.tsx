@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from 'react';
@@ -77,7 +78,8 @@ export function DietProvider({ children }: { children: ReactNode }) {
   const [steps, setStepsState] = useState<number>(0);
   const [waterMl, setWaterMl] = useState<number>(0);
 
-  const activeUserId = session?.userId || 'default';
+  // 진행 중인 비동기/타이머 작업 차단을 위한 Ref
+  const isLoggingOutRef = useRef(false);
 
   // 1. 초기 마운트 시 세션 및 로컬 데이터 복원 (SSR Hydration 방어)
   useEffect(() => {
@@ -92,11 +94,20 @@ export function DietProvider({ children }: { children: ReactNode }) {
     setHydrated(true);
   }, []);
 
-  // 2. 날짜나 세션이 변경될 때 해당 날짜의 일일 로그 및 최근 체중 로드
+  // 2. 날짜나 세션이 변경될 때 해당 계정의 일일 로그 및 최근 체중 로드
   useEffect(() => {
-    if (!hydrated) return;
+    if (!hydrated || isLoggingOutRef.current) return;
 
-    const log = loadDailyLog(activeUserId, selectedDate);
+    if (!session) {
+      setFoods([]);
+      setExercises([]);
+      setWeights([]);
+      setStepsState(0);
+      setWaterMl(0);
+      return;
+    }
+
+    const log = loadDailyLog(session.userId, selectedDate);
     if (log) {
       setFoods(log.foods || []);
       setExercises(log.exercises || []);
@@ -109,20 +120,21 @@ export function DietProvider({ children }: { children: ReactNode }) {
       setWaterMl(0);
     }
 
-    const recentWeights = getRecentWeightLogs(activeUserId, selectedDate, 14);
+    const recentWeights = getRecentWeightLogs(session.userId, selectedDate, 14);
     setWeights(recentWeights);
-  }, [hydrated, activeUserId, selectedDate]);
+  }, [hydrated, session, selectedDate]);
 
   // 3. 프로필 저장
   const setProfile = useCallback(
     (newProfile: Profile) => {
+      if (!session || isLoggingOutRef.current) return;
       setProfileState(newProfile);
-      saveUserProfile(activeUserId, newProfile);
+      saveUserProfile(session.userId, newProfile);
     },
-    [activeUserId]
+    [session]
   );
 
-  // 4. 일일 데이터 변경 시 로컬 스토리지 즉시 저장 및 Google Sheets 백그라운드 동기화
+  // 4. 일일 데이터 변경 시 로컬 스토리지 즉시 저장 및 Google Sheets 백그라운드 동기화 (계정 격리 보장)
   const persistDailyData = useCallback(
     (
       newFoods: FoodEntry[],
@@ -131,6 +143,9 @@ export function DietProvider({ children }: { children: ReactNode }) {
       newWater: number,
       currentWeightVal?: number
     ) => {
+      if (!session || isLoggingOutRef.current) return;
+
+      const currentUid = session.userId;
       const dataToSave = {
         date: selectedDate,
         foods: newFoods,
@@ -140,21 +155,44 @@ export function DietProvider({ children }: { children: ReactNode }) {
         targetWaterMl: DEFAULT_TARGET_WATER,
         weight: currentWeightVal,
       };
-      saveDailyLog(activeUserId, selectedDate, dataToSave);
-      syncDailyLogToGoogleSheet(activeUserId, dataToSave, profile);
+      saveDailyLog(currentUid, selectedDate, dataToSave);
+      syncDailyLogToGoogleSheet(currentUid, dataToSave, profile);
     },
-    [activeUserId, selectedDate, profile]
+    [session, selectedDate, profile]
   );
 
-  // 5. 로그인 및 로그아웃 핸들러
-  const login = useCallback((newSession: UserSession) => {
-    setSession(newSession);
-    setSavedSession(newSession);
-    const loadedProfile = loadUserProfile(newSession.userId);
-    setProfileState(loadedProfile);
-  }, []);
+  // 5. 로그인 및 로그아웃 핸들러 (Race Condition 방어)
+  const login = useCallback(
+    (newSession: UserSession) => {
+      isLoggingOutRef.current = false;
+      setSession(newSession);
+      setSavedSession(newSession);
+
+      // 새 계정의 프로필 및 당일 기록 즉시 로드
+      const loadedProfile = loadUserProfile(newSession.userId);
+      setProfileState(loadedProfile);
+
+      const log = loadDailyLog(newSession.userId, selectedDate);
+      if (log) {
+        setFoods(log.foods || []);
+        setExercises(log.exercises || []);
+        setStepsState(safeVal(log.steps, 0));
+        setWaterMl(safeVal(log.waterMl, 0));
+      } else {
+        setFoods([]);
+        setExercises([]);
+        setStepsState(0);
+        setWaterMl(0);
+      }
+
+      const recentWeights = getRecentWeightLogs(newSession.userId, selectedDate, 14);
+      setWeights(recentWeights);
+    },
+    [selectedDate]
+  );
 
   const logout = useCallback(() => {
+    isLoggingOutRef.current = true;
     setSavedSession(null);
     setSession(null);
     setProfileState(null);
@@ -163,6 +201,9 @@ export function DietProvider({ children }: { children: ReactNode }) {
     setWeights([]);
     setStepsState(0);
     setWaterMl(0);
+    setTimeout(() => {
+      isLoggingOutRef.current = false;
+    }, 50);
   }, []);
 
   // 6. 식단 액션 (추가, 삭제, 수량 증감)
@@ -250,6 +291,8 @@ export function DietProvider({ children }: { children: ReactNode }) {
   // 10. 체중 기록 액션
   const setWeight = useCallback(
     (date: string, weight: number) => {
+      if (!session || isLoggingOutRef.current) return;
+      const currentUid = session.userId;
       const validWeight = Math.round(safeVal(weight, 70) * 10) / 10;
       setWeights((prev) => {
         const filtered = prev.filter((w) => w.date !== date);
@@ -257,7 +300,7 @@ export function DietProvider({ children }: { children: ReactNode }) {
       });
 
       // 일일 데이터에도 체중 저장
-      const curLog = loadDailyLog(activeUserId, date);
+      const curLog = loadDailyLog(currentUid, date);
       const updatedLog = {
         date,
         foods: curLog?.foods || (date === selectedDate ? foods : []),
@@ -267,10 +310,10 @@ export function DietProvider({ children }: { children: ReactNode }) {
         targetWaterMl: DEFAULT_TARGET_WATER,
         weight: validWeight,
       };
-      saveDailyLog(activeUserId, date, updatedLog);
-      syncDailyLogToGoogleSheet(activeUserId, updatedLog, profile);
+      saveDailyLog(currentUid, date, updatedLog);
+      syncDailyLogToGoogleSheet(currentUid, updatedLog, profile);
     },
-    [activeUserId, selectedDate, foods, exercises, steps, waterMl, profile]
+    [session, selectedDate, foods, exercises, steps, waterMl, profile]
   );
 
   // 11. 계산 프로퍼티 도출 (BMR, 일일 목표, 탄단지, 걸음 소모량)

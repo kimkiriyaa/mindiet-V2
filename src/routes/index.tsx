@@ -7,6 +7,7 @@ import { HomeTab } from "@/components/diet/HomeTab";
 import { CoachTab } from "@/components/diet/CoachTab";
 import { BattleTab } from "@/components/diet/BattleTab";
 import { MyInfoTab } from "@/components/diet/MyInfoTab";
+import { AuthModal } from "@/components/diet/AuthModal";
 import { OnboardingModal } from "@/components/diet/OnboardingModal";
 
 export const Route = createFileRoute("/")({
@@ -24,10 +25,19 @@ export const Route = createFileRoute("/")({
 });
 
 function App() {
-  const { hydrated, profile } = useDiet();
+  const { hydrated, session, profile } = useDiet();
   const [tab, setTab] = useState<TabKey>("home");
+
+  // SSR / Hydration 로딩 중 플리커 방지
   if (!hydrated) return null;
+
+  // 1. 로그인 세션이 없으면 AuthModal 표시
+  if (!session) return <AuthModal />;
+
+  // 2. 세션은 있으나 프로필이 없으면 OnboardingModal 표시
   if (!profile) return <OnboardingModal />;
+
+  // 3. 인증 및 프로필 완료 시 메인 화면 진입
   return (
     <>
       <main className="px-5 pb-24 pt-5">

@@ -12,14 +12,15 @@ import { WeightCard } from "./WeightCard";
 const DOW = ["일", "월", "화", "수", "목", "금", "토"];
 
 export function HomeTab() {
-  const { profile, selectedDate, setSelectedDate } = useDiet();
+  const { profile, session, selectedDate, setSelectedDate } = useDiet();
   const d = fromDateKey(selectedDate);
   const isToday = selectedDate === toLocalDateKey();
+  const displayName = profile?.nickname || session?.userName || "회원";
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-lg font-extrabold text-primary"><Sprout className="h-5 w-5" />민다이어트</div>
-        <span className="truncate text-sm text-muted-foreground">{profile?.nickname}님 안녕하세요 👋</span>
+        <span className="truncate text-sm text-muted-foreground">{displayName}님 안녕하세요 👋</span>
       </header>
       <div className="flex items-center justify-between rounded-2xl bg-secondary px-2 py-1.5">
         <button aria-label="이전 날짜" onClick={() => setSelectedDate(shiftDateKey(selectedDate, -1))} className="grid h-9 w-9 place-items-center rounded-full hover:bg-background"><ChevronLeft className="h-5 w-5" /></button>

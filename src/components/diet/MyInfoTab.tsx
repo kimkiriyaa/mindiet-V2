@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { LogOut } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -7,12 +8,19 @@ import { calculateDailyTargetCalories, DIET_LABEL, GOAL_LABEL, latestWeight, mac
 import { ProfileFields } from "./ProfileFields";
 
 export function MyInfoTab({ onSaved }: { onSaved: () => void }) {
-  const { profile, setProfile, weights, selectedDate } = useDiet();
+  const { profile, setProfile, weights, selectedDate, logout, session } = useDiet();
   const [draft, setDraft] = useState<Profile>(profile!);
   const w = latestWeight(draft, weights, selectedDate);
   const { bmr, target } = calculateDailyTargetCalories(draft, w);
   const m = macroTargets(target, draft.dietType);
   const badges = ["🌱 시작", weights.length >= 3 ? "⚖️ 꾸준 체중" : null, "🔥 3일 연속"].filter(Boolean);
+
+  const handleLogout = () => {
+    if (typeof window !== "undefined" && window.confirm("정말 로그아웃 하시겠습니까?")) {
+      logout();
+      toast.info("로그아웃되었습니다.");
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -24,7 +32,9 @@ export function MyInfoTab({ onSaved }: { onSaved: () => void }) {
           <div className="mt-2 flex flex-wrap gap-1">{badges.map((b) => <span key={b} className="rounded-full bg-secondary px-2 py-0.5 text-[11px]">{b}</span>)}</div>
         </div>
       </section>
+
       <ProfileFields value={draft} onChange={setDraft} sections={["basic", "weight", "plan"]} />
+
       <section className="rounded-3xl bg-accent p-5 text-accent-foreground">
         <p className="text-xs font-semibold">실시간 미리보기 (체중 {w}kg 기준)</p>
         <div className="mt-3 grid grid-cols-2 gap-3">
@@ -37,7 +47,21 @@ export function MyInfoTab({ onSaved }: { onSaved: () => void }) {
           ))}
         </div>
       </section>
-      <Button className="h-12 w-full" onClick={() => { setProfile(draft); toast.success("저장했어요!"); onSaved(); }}>저장하기</Button>
+
+      <Button className="h-12 w-full font-bold" onClick={() => { setProfile(draft); toast.success("저장했어요!"); onSaved(); }}>
+        프로필 저장하기
+      </Button>
+
+      {/* 로그아웃 버튼 */}
+      <Button
+        variant="ghost"
+        type="button"
+        onClick={handleLogout}
+        className="w-full text-xs text-destructive hover:bg-destructive/10 hover:text-destructive h-10 rounded-xl"
+      >
+        <LogOut className="h-4 w-4 mr-1.5" />
+        로그아웃 ({session?.userName || session?.userId || "계정"})
+      </Button>
     </div>
   );
 }
