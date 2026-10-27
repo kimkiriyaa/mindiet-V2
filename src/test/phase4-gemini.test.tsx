@@ -342,4 +342,267 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(screen.queryByText("AI 정밀 분석")).not.toBeInTheDocument();
     });
   });
+
+  describe("7. Gemini 업스트림 네트워크 호출 및 에러 마스킹 (지침 1)", () => {
+    const validPng =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    it("(a) 정상 200 응답: source가 'ai'이고, URL에 쿼리스트링 키(?key=)가 없으며 x-goog-api-key 헤더 검증", async () => {
+      process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      name: "신선한 사과",
+                      quantity: 1,
+                      unit: "개",
+                      calories: 95,
+                      carbs: 25,
+                      protein: 0.5,
+                      fat: 0.3,
+                      description: "AI 사과 분석 완료",
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as any);
+
+      const res = await analyzeMealPhotoHandler({ image: validPng });
+      expect(res.source).toBe("ai");
+      expect(res.name).toBe("신선한 사과");
+      expect(res.totalKcal).toBe(95);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [calledUrl, calledOptions] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(calledUrl).not.toContain("?key=");
+      expect(calledUrl).not.toContain("SECURE_TEST_KEY_456");
+      expect((calledOptions.headers as Record<string, string>)["x-goog-api-key"]).toBe("SECURE_TEST_KEY_456");
+    });
+
+    it("(b) HTTP 500 에러: 던져진 예외 메시지에 API 키나 원본 응답 본문이 없고 표준 한글 메시지만 노출", async () => {
+      process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Crash",
+        text: async () => "Secret Raw Stacktrace with AIzaSyDummyKey",
+      } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "식단 분석에 실패했습니다. 다시 시도해 주세요. [ERR_UPSTREAM_FAIL]"
+      );
+
+      try {
+        await analyzeMealPhotoHandler({ image: validPng });
+      } catch (err: any) {
+        expect(err.message).not.toContain("SECURE_TEST_KEY_456");
+        expect(err.message).not.toContain("Secret");
+        expect(err.message).not.toContain("AIza");
+        expect(err.message).not.toContain("Crash");
+      }
+    });
+
+    it("(c) HTTP 429 에러: [ERR_RATE_LIMIT] 에러 코드가 정상 반환", async () => {
+      process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+      } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow("[ERR_RATE_LIMIT]");
+    });
+
+    it("(d) 네트워크 예외(reject with SENTINEL): 메시지와 콘솔 로그 어디에도 SENTINEL 미노출 및 안전 에러 변환", async () => {
+      process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
+      vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(
+        new Error("network connection dropped boom SENTINEL_KEY_XYZ_123")
+      );
+
+      const warnSpy = vi.spyOn(console, "warn");
+      const errorSpy = vi.spyOn(console, "error");
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "식단 분석에 실패했습니다. 네트워크 상태를 확인해 주세요. [ERR_NETWORK]"
+      );
+
+      // 콘솔 로그 전수 조사
+      const allWarnLogs = warnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      const allErrorLogs = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(allWarnLogs).not.toContain("SENTINEL_KEY_XYZ_123");
+      expect(allErrorLogs).not.toContain("SENTINEL_KEY_XYZ_123");
+    });
+
+    it("(e) 텍스트 음식/운동 추정 시 Gemini 호출 실패 시 fallback으로 전환되며 source가 절대 'ai'가 아님", async () => {
+      process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
+      vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Upstream Network Timeout"));
+
+      // 1) 텍스트 음식 추정 (사전에 없는 신규 메뉴)
+      const foodRes = await estimateFoodTextHandler({ text: "알수없는마법스튜 1그릇" });
+      expect(foodRes.source).toBe("fallback");
+      expect(foodRes.source).not.toBe("ai");
+      expect(foodRes.isEstimate).toBe(true);
+
+      // 2) 운동 추정 (사전에 없는 종목)
+      const exerciseRes = await estimateExerciseCaloriesHandler({ text: "무중력 유영 45분", weight: 70 });
+      expect(exerciseRes.source).toBe("fallback");
+      expect(exerciseRes.source).not.toBe("ai");
+      expect(exerciseRes.isEstimate).toBe(true);
+    });
+  });
+
+  describe("8. UI 뱃지 결정 조건 독립성 테스트 보강 (AddFoodModal & ExerciseCard) (지침 2)", () => {
+    it("AddFoodModal: source: 'fallback' + isEstimate: false 조합 시 '대략적 추정값' 뱃지 렌더링", async () => {
+      const { estimateFoodTextFn } = await import("@/services/geminiServerFn");
+      vi.mocked(estimateFoodTextFn).mockResolvedValueOnce({
+        name: "테스트 불일치 음식 A",
+        quantity: 1,
+        unit: "인분",
+        unitKcal: 350,
+        unitCarb: 40,
+        unitProtein: 15,
+        unitFat: 10,
+        totalKcal: 350,
+        isEstimate: false, // isEstimate는 false이나
+        source: "fallback", // source는 fallback
+      });
+
+      render(
+        <DietProvider>
+          <AddFoodModal meal="lunch" onClose={vi.fn()} />
+        </DietProvider>
+      );
+
+      const manualTab = screen.getByRole("tab", { name: "직접 입력" });
+      await act(async () => {
+        fireEvent.pointerDown(manualTab);
+        fireEvent.click(manualTab);
+      });
+
+      const input = screen.getByPlaceholderText("예: 현미밥 또는 닭가슴살 샐러드");
+      fireEvent.change(input, { target: { value: "임의음식A" } });
+
+      const estimateBtn = screen.getByRole("button", { name: /AI 추정/ });
+      await act(async () => {
+        fireEvent.click(estimateBtn);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("대략적 추정값")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("AI 정밀 분석")).not.toBeInTheDocument();
+    });
+
+    it("AddFoodModal: source: 'ai' + isEstimate: true 조합 시 'AI 정밀 분석' 뱃지 렌더링", async () => {
+      const { estimateFoodTextFn } = await import("@/services/geminiServerFn");
+      vi.mocked(estimateFoodTextFn).mockResolvedValueOnce({
+        name: "테스트 불일치 음식 B",
+        quantity: 1,
+        unit: "인분",
+        unitKcal: 450,
+        unitCarb: 50,
+        unitProtein: 20,
+        unitFat: 15,
+        totalKcal: 450,
+        isEstimate: true, // isEstimate는 true이나
+        source: "ai", // source는 ai
+      });
+
+      render(
+        <DietProvider>
+          <AddFoodModal meal="lunch" onClose={vi.fn()} />
+        </DietProvider>
+      );
+
+      const manualTab = screen.getByRole("tab", { name: "직접 입력" });
+      await act(async () => {
+        fireEvent.pointerDown(manualTab);
+        fireEvent.click(manualTab);
+      });
+
+      const input = screen.getByPlaceholderText("예: 현미밥 또는 닭가슴살 샐러드");
+      fireEvent.change(input, { target: { value: "임의음식B" } });
+
+      const estimateBtn = screen.getByRole("button", { name: /AI 추정/ });
+      await act(async () => {
+        fireEvent.click(estimateBtn);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("AI 정밀 분석")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("대략적 추정값")).not.toBeInTheDocument();
+    });
+
+    it("ExerciseCard: source: 'fallback' + isEstimate: false 조합 시 '대략적 추정값' 뱃지 렌더링", async () => {
+      const { estimateExerciseCaloriesFn } = await import("@/services/geminiServerFn");
+      vi.mocked(estimateExerciseCaloriesFn).mockResolvedValueOnce({
+        name: "불일치 운동 A",
+        durationMinutes: 30,
+        calories: 180,
+        description: "추정 운동 A",
+        isEstimate: false, // isEstimate는 false이나
+        source: "fallback", // source는 fallback
+      });
+
+      render(
+        <DietProvider>
+          <ExerciseCard />
+        </DietProvider>
+      );
+
+      const input = screen.getByPlaceholderText("운동 종목 (예: 수영 40분)");
+      fireEvent.change(input, { target: { value: "불일치 운동 A" } });
+
+      const estimateBtn = screen.getByRole("button", { name: /AI 추정/ });
+      await act(async () => {
+        fireEvent.click(estimateBtn);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("대략적 추정값")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("AI 정밀 분석")).not.toBeInTheDocument();
+    });
+
+    it("ExerciseCard: source: 'ai' + isEstimate: true 조합 시 'AI 정밀 분석' 뱃지 렌더링", async () => {
+      const { estimateExerciseCaloriesFn } = await import("@/services/geminiServerFn");
+      vi.mocked(estimateExerciseCaloriesFn).mockResolvedValueOnce({
+        name: "불일치 운동 B",
+        durationMinutes: 40,
+        calories: 280,
+        description: "AI 운동 B",
+        isEstimate: true, // isEstimate는 true이나
+        source: "ai", // source는 ai
+      });
+
+      render(
+        <DietProvider>
+          <ExerciseCard />
+        </DietProvider>
+      );
+
+      const input = screen.getByPlaceholderText("운동 종목 (예: 수영 40분)");
+      fireEvent.change(input, { target: { value: "불일치 운동 B" } });
+
+      const estimateBtn = screen.getByRole("button", { name: /AI 추정/ });
+      await act(async () => {
+        fireEvent.click(estimateBtn);
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText("AI 정밀 분석")).toBeInTheDocument();
+      });
+      expect(screen.queryByText("대략적 추정값")).not.toBeInTheDocument();
+    });
+  });
 });

@@ -308,8 +308,9 @@ export async function estimateFoodTextHandler(data: { text: string }): Promise<F
           };
         }
       }
-    } catch (err) {
-      console.warn("[geminiServerFn] 텍스트 분석 API 실패, 자체 추정으로 대체:", err);
+    } catch (err: any) {
+      const errCode = err?.message?.match(/\[ERR_[A-Z_]+\]/)?.[0] || "[ERR_UPSTREAM_FAIL]";
+      console.warn(`[geminiServerFn] 텍스트 분석 API 실패 ${errCode}, 자체 추정으로 대체`);
     }
   }
 
@@ -410,8 +411,9 @@ export async function estimateExerciseCaloriesHandler(data: {
           };
         }
       }
-    } catch (err) {
-      console.warn("[geminiServerFn] 운동 추정 API 실패, MET 5.0 기본 공식 적용:", err);
+    } catch (err: any) {
+      const errCode = err?.message?.match(/\[ERR_[A-Z_]+\]/)?.[0] || "[ERR_UPSTREAM_FAIL]";
+      console.warn(`[geminiServerFn] 운동 추정 API 실패 ${errCode}, MET 5.0 기본 공식 적용`);
     }
   }
 
