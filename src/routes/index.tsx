@@ -25,11 +25,13 @@ export const Route = createFileRoute("/")({
 });
 
 function App() {
-  const { hydrated, session, profile } = useDiet();
+  const { hydrated, session, profile, isProfileLoaded } = useDiet();
   const [tab, setTab] = useState<TabKey>("home");
 
-  // SSR / Hydration 로딩 중 플리커 방지
-  if (!hydrated) return null;
+  // SSR / Hydration 로딩 중 또는 세션은 있으나 프로필 조회가 진행 중인 찰나의 플리커 차단
+  if (!hydrated || (session && !isProfileLoaded)) {
+    return null;
+  }
 
   // 1. 로그인 세션이 없으면 AuthModal 표시
   if (!session) return <AuthModal />;

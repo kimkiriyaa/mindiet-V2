@@ -388,7 +388,21 @@ export const loadUserProfile = (userId?: string): Profile | null => {
 
 export const saveUserProfile = (userId: string, profile: Profile): void => {
   if (typeof window === 'undefined') return;
-  const key = getProfileKey(userId);
+
+  const trimmedId = userId ? userId.trim() : '';
+  if (!trimmedId) {
+    console.warn('[storageService] saveUserProfile 차단: 유효하지 않은 userId');
+    return;
+  }
+
+  // [원자적 세션 일치 검증] 활성 세션이 있을 경우 세션 ID와 일치할 때만 저장
+  const currentSession = getSavedSession();
+  if (currentSession && currentSession.userId.toLowerCase() !== trimmedId.toLowerCase()) {
+    console.warn(`[storageService] saveUserProfile 차단: 세션 불일치 (${currentSession.userId} vs ${trimmedId})`);
+    return;
+  }
+
+  const key = getProfileKey(trimmedId);
   try {
     localStorage.setItem(key, JSON.stringify(profile));
   } catch (e) {
@@ -473,7 +487,21 @@ export const loadDailyLog = (userId: string, date: string): DailyLogData | null 
 
 export const saveDailyLog = (userId: string, date: string, data: DailyLogData): void => {
   if (typeof window === 'undefined') return;
-  const key = getLogStorageKey(date, userId);
+
+  const trimmedId = userId ? userId.trim() : '';
+  if (!trimmedId) {
+    console.warn('[storageService] saveDailyLog 차단: 유효하지 않은 userId');
+    return;
+  }
+
+  // [원자적 세션 일치 검증] 활성 세션이 있을 경우 세션 ID와 일치할 때만 저장
+  const currentSession = getSavedSession();
+  if (currentSession && currentSession.userId.toLowerCase() !== trimmedId.toLowerCase()) {
+    console.warn(`[storageService] saveDailyLog 차단: 세션 불일치 (${currentSession.userId} vs ${trimmedId})`);
+    return;
+  }
+
+  const key = getLogStorageKey(date, trimmedId);
   try {
     localStorage.setItem(key, JSON.stringify(data));
   } catch (e) {
@@ -542,7 +570,8 @@ export const syncAuthToGoogleSheet = async (
 export const syncDailyLogToGoogleSheet = async (
   userId: string,
   log: DailyLogData,
-  profile?: Profile | null
+  profile?: Profile | null,
+  signal?: AbortSignal
 ): Promise<void> => {
   const url = getGoogleSheetUrl();
   if (!url) return; // 환경변수가 없으면 No-op 건너뜀
@@ -578,6 +607,7 @@ export const syncDailyLogToGoogleSheet = async (
       mode: 'no-cors',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: signal ?? null,
     }).catch(() => {
       // fire-and-forget 무시
     });

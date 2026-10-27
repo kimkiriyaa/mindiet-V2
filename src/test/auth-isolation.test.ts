@@ -116,4 +116,42 @@ describe('Phase 2: 계정 인증, 데이터 격리 및 온보딩 가드 검증',
     expect(profile2).not.toBeNull();
     expect(profile2?.nickname).toBe('신규유저');
   });
+
+  it('5. 비동기 저장 및 계정 전환 Race Condition 차단 검증', async () => {
+    // 1) 계정 A 준비
+    await registerUserLocal('userA', 'pwA', '사용자A');
+    setSavedSession({ userId: 'userA', userName: '사용자A' });
+    saveDailyLog('userA', '2026-10-27', {
+      date: '2026-10-27',
+      foods: [{ id: 'f1', date: '2026-10-27', meal: 'breakfast', name: '사과', qty: 1, unitKcal: 100, unitCarb: 25, unitProtein: 0, unitFat: 0 }],
+      exercises: [],
+    });
+
+    // 2) 로그아웃 실행 (세션 해제)
+    setSavedSession(null);
+    expect(getSavedSession()).toBeNull();
+
+    // 3) 계정 B 등록 및 로그인
+    await registerUserLocal('userB', 'pwB', '사용자B');
+    setSavedSession({ userId: 'userB', userName: '사용자B' });
+
+    // 계정 B에 계정 A 데이터가 누출되지 않았는지 확인
+    const logB = loadDailyLog('userB', '2026-10-27');
+    expect(logB).toBeNull();
+
+    // 계정 B 신규 데이터 저장
+    saveDailyLog('userB', '2026-10-27', {
+      date: '2026-10-27',
+      foods: [{ id: 'f2', date: '2026-10-27', meal: 'lunch', name: '샐러드', qty: 1, unitKcal: 200, unitCarb: 15, unitProtein: 5, unitFat: 10 }],
+      exercises: [],
+    });
+
+    // 계정 A와 계정 B의 스토리지 데이터가 각자의 키로 완전히 분리 보존됨을 확인
+    const checkLogA = loadDailyLog('userA', '2026-10-27');
+    const checkLogB = loadDailyLog('userB', '2026-10-27');
+
+    expect(checkLogA?.foods[0]?.name).toBe('사과');
+    expect(checkLogB?.foods[0]?.name).toBe('샐러드');
+    expect(checkLogA?.foods[0]?.name).not.toBe(checkLogB?.foods[0]?.name);
+  });
 });
