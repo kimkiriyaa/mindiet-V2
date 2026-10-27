@@ -24,8 +24,8 @@ export const Route = createFileRoute("/")({
   component: Index,
 });
 
-function App() {
-  const { hydrated, session, profile, isProfileLoaded } = useDiet();
+export function App() {
+  const { hydrated, session, profile, isProfileLoaded, profileLoadStatus, logout, recoverCorruptedProfile } = useDiet();
   const [tab, setTab] = useState<TabKey>("home");
 
   // SSR / Hydration 로딩 중 또는 세션은 있으나 프로필 조회가 진행 중인 찰나의 플리커 차단
@@ -36,7 +36,53 @@ function App() {
   // 1. 로그인 세션이 없으면 AuthModal 표시
   if (!session) return <AuthModal />;
 
-  // 2. 세션은 있으나 프로필이 없으면 OnboardingModal 표시
+  // 1-1. 스토리지 읽기 에러 발생 시 온보딩(신규 유저)으로 오판하지 않고 안전한 복구 에러 화면 표시
+  if (profileLoadStatus === 'error') {
+    const handleReset = () => {
+      const confirmed = typeof window !== 'undefined' && window.confirm
+        ? window.confirm('손상된 기존 프로필을 백업하고 초기 설정으로 새로 시작하시겠습니까?')
+        : false;
+      if (confirmed) {
+        recoverCorruptedProfile();
+      }
+    };
+
+    return (
+      <div className="flex h-screen items-center justify-center p-6 text-center" data-testid="storage-error-screen">
+        <div className="max-w-md rounded-2xl border border-destructive/20 bg-destructive/10 p-6 space-y-4">
+          <h2 className="text-lg font-bold text-destructive">데이터 읽기 오류</h2>
+          <p className="text-sm text-muted-foreground leading-relaxed">
+            저장소에서 프로필을 불러오는 중 오류가 발생했습니다.<br />
+            기존 데이터를 안전하게 보호하기 위해 자동 저장이 중단되었습니다.
+          </p>
+          <div className="flex flex-col gap-2 pt-2">
+            <button
+              onClick={() => window.location.reload()}
+              className="w-full py-2 px-4 rounded-xl bg-primary text-primary-foreground font-medium text-sm hover:opacity-90 transition shadow-xs"
+            >
+              새로고침
+            </button>
+            <button
+              onClick={logout}
+              data-testid="error-logout-btn"
+              className="w-full py-2 px-4 rounded-xl border border-border bg-card font-medium text-sm hover:bg-muted transition"
+            >
+              로그아웃
+            </button>
+            <button
+              onClick={handleReset}
+              data-testid="error-reset-btn"
+              className="w-full py-2 px-4 rounded-xl border border-destructive/40 text-destructive text-sm font-medium hover:bg-destructive/10 transition"
+            >
+              손상 데이터 백업 후 새로 시작
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 2. 세션은 있으나 정상적으로 프로필이 없는 경우(신규 사용자)에만 OnboardingModal 표시
   if (!profile) return <OnboardingModal />;
 
   // 3. 인증 및 프로필 완료 시 메인 화면 진입
@@ -53,7 +99,7 @@ function App() {
   );
 }
 
-function Index() {
+export function Index() {
   return (
     <div className="min-h-screen bg-canvas">
       <div className="mx-auto min-h-screen w-full max-w-[480px] bg-background shadow-sm">

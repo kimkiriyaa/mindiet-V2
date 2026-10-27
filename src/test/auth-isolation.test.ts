@@ -33,8 +33,9 @@ describe('Phase 2: 계정 인증, 데이터 격리 및 온보딩 가드 검증',
   });
 
   it('2. 계정 격리 검증: 계정 A 기록 후 로그아웃 -> 계정 B 로그인 시 A 데이터 미노출', async () => {
-    // 1) 계정 A 등록 및 기록
+    // 1) 계정 A 등록 및 로그인 세션 설정 후 기록
     await registerUserLocal('userA', 'pwA', '사용자A');
+    setSavedSession({ userId: 'userA', userName: '사용자A' });
     const profileA: Profile = {
       ...DEFAULT_PROFILE,
       nickname: '사용자A',
@@ -63,8 +64,10 @@ describe('Phase 2: 계정 인증, 데이터 격리 및 온보딩 가드 검증',
     };
     saveDailyLog('userA', '2026-10-27', logA);
 
-    // 2) 계정 A 로그아웃 및 계정 B 등록
+    // 2) 계정 A 로그아웃 및 계정 B 등록/로그인
+    setSavedSession(null);
     await registerUserLocal('userB', 'pwB', '사용자B');
+    setSavedSession({ userId: 'userB', userName: '사용자B' });
 
     // 계정 B로 조회 시 계정 A의 프로필과 로그가 일체 조회되지 않음 (완벽한 격리)
     const profileB = loadUserProfile('userB');
@@ -81,6 +84,8 @@ describe('Phase 2: 계정 인증, 데이터 격리 및 온보딩 가드 검증',
     };
     saveUserProfile('userB', profileBNew);
 
+    // 계정 A로 세션 전환 후 재조회
+    setSavedSession({ userId: 'userA', userName: '사용자A' });
     const reloadedProfileA = loadUserProfile('userA');
     const reloadedLogA = loadDailyLog('userA', '2026-10-27');
 
@@ -110,7 +115,8 @@ describe('Phase 2: 계정 인증, 데이터 격리 및 온보딩 가드 검증',
     const profile1 = loadUserProfile('newUser');
     expect(profile1).toBeNull();
 
-    // 2) 온보딩 완료 후 프로필 저장 -> 이후 로그인 시 프로필 즉시 로드 (온보딩 불필요)
+    // 2) 온보딩 완료 후 세션 상태에서 프로필 저장 -> 이후 로그인 시 프로필 즉시 로드 (온보딩 불필요)
+    setSavedSession({ userId: 'newUser', userName: '신규유저' });
     saveUserProfile('newUser', { ...DEFAULT_PROFILE, nickname: '신규유저' });
     const profile2 = loadUserProfile('newUser');
     expect(profile2).not.toBeNull();

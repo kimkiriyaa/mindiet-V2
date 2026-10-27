@@ -168,19 +168,33 @@ export const hashPassword = async (password: string, salt: string): Promise<stri
 // 2. 키 규칙 및 세션 관리
 // ==========================================
 
-export const sanitizeUserId = (userId?: string): string => {
+/**
+ * 아이디 정규화 단일 표준:
+ * normalize('NFC') -> trim() -> toLowerCase() -> encodeURIComponent()
+ * - 기존 [a-z0-9_-] 조합의 영문 계정은 결과가 100% 동일하여 마이그레이션 불필요
+ * - 한글, 마침표(.), 공백 등 비ASCII/특수문자 간 네임스페이스 충돌을 원천 차단
+ */
+export const normalizeUserId = (userId?: string): string => {
   if (!userId || typeof userId !== 'string' || !userId.trim()) {
     return 'default';
   }
-  return userId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '_');
+  try {
+    return encodeURIComponent(userId.normalize('NFC').trim().toLowerCase());
+  } catch {
+    // Unpaired Surrogate (e.g. '\uD800') 등 URIError 방어
+    return 'invalid_id';
+  }
 };
 
+// 하위 호환성을 위해 sanitizeUserId도 normalizeUserId를 참조하도록 일원화
+export const sanitizeUserId = normalizeUserId;
+
 export const getProfileKey = (userId?: string): string => {
-  return `min_diet_${sanitizeUserId(userId)}_profile`;
+  return `min_diet_${normalizeUserId(userId)}_profile`;
 };
 
 export const getLogStorageKey = (date: string, userId?: string): string => {
-  return `min_diet_${sanitizeUserId(userId)}_log_${date}`;
+  return `min_diet_${normalizeUserId(userId)}_log_${date}`;
 };
 
 export const getSavedSession = (): UserSession | null => {
@@ -204,6 +218,90 @@ export const setSavedSession = (session: UserSession | null): void => {
     }
   } catch (e) {
     console.error('Failed to set session in localStorage:', e);
+  }
+};
+
+// ==========================================
+// 2-1. 스토리지 로드 상태 구분 및 안전 백업 저장
+// ==========================================
+
+export type StorageLoadStatus = 'ok' | 'missing' | 'error';
+
+export interface StorageLoadResult<T> {
+  status: StorageLoadStatus;
+  data: T | null;
+  error?: unknown;
+  rawValue?: string | null;
+}
+
+export type StorageSaveResult =
+  | { ok: true }
+  | { ok: false; reason: 'guard' | 'quota' | 'error'; error?: unknown };
+
+/**
+ * 손상 데이터 덮어쓰기 방지를 위한 원본 백업 저장 헬퍼
+ * 백업 저장이 성공해야만 원본 변경을 허용한다.
+ * 실패 시 명시적인 StorageSaveResult 객체를 반환한다.
+ */
+export const saveWithBackup = (key: string, value: string): StorageSaveResult => {
+  if (typeof window === 'undefined') {
+    return { ok: false, reason: 'error', error: new Error('window is undefined') };
+  }
+  const backupKey = `${key}_backup`;
+  const existing = localStorage.getItem(key);
+
+  if (existing !== null) {
+    try {
+      localStorage.setItem(backupKey, existing);
+      const verified = localStorage.getItem(backupKey);
+      if (verified !== existing) {
+        throw new Error('Backup verification failed: content mismatch');
+      }
+    } catch (err: any) {
+      console.error(`[storageService] 백업 생성 실패로 원본 보존 (key: ${key}):`, err);
+      const isQuota = err?.name === 'QuotaExceededError' || err?.code === 22 || err?.number === -2147024882;
+      return { ok: false, reason: isQuota ? 'quota' : 'error', error: err };
+    }
+  }
+
+  try {
+    localStorage.setItem(key, value);
+    return { ok: true };
+  } catch (err: any) {
+    console.error(`[storageService] 원본 저장 실패 (key: ${key}):`, err);
+    if (existing !== null) {
+      try {
+        localStorage.setItem(key, existing);
+      } catch {
+        // ignore
+      }
+    }
+    const isQuota = err?.name === 'QuotaExceededError' || err?.code === 22 || err?.number === -2147024882;
+    return { ok: false, reason: isQuota ? 'quota' : 'error', error: err };
+  }
+};
+
+/**
+ * 손상된 프로필 데이터를 타임스탬프 백업 키로 격리하고 원본 키를 초기화하는 복구 헬퍼
+ */
+export const backupAndResetCorruptedProfile = (userId: string): { ok: boolean; corruptBackupKey?: string; error?: unknown } => {
+  if (typeof window === 'undefined') return { ok: false, error: new Error('window is undefined') };
+  const key = getProfileKey(userId);
+  try {
+    const raw = localStorage.getItem(key);
+    const corruptBackupKey = `${key}.corrupt_${Date.now()}`;
+    if (raw !== null) {
+      localStorage.setItem(corruptBackupKey, raw);
+      const verified = localStorage.getItem(corruptBackupKey);
+      if (verified !== raw) {
+        throw new Error('Backup verification failed: content mismatch');
+      }
+    }
+    localStorage.removeItem(key);
+    return { ok: true, corruptBackupKey };
+  } catch (err) {
+    console.error('[storageService] 손상 프로필 격리 백업 실패:', err);
+    return { ok: false, error: err };
   }
 };
 
@@ -251,8 +349,13 @@ export const registerUserLocal = async (
     return { success: false, message: '모든 필드를 입력해 주세요.' };
   }
 
+  // 시스템 예약어 검사: 'default' 아이디 가입 차단
+  if (trimmedId.toLowerCase() === 'default') {
+    return { success: false, message: '사용할 수 없는 예약된 아이디입니다.' };
+  }
+
   const users = getRegisteredUsers();
-  const exists = users.some((u) => u.userId.toLowerCase() === trimmedId.toLowerCase());
+  const exists = users.some((u) => normalizeUserId(u.userId) === normalizeUserId(trimmedId));
   if (exists) {
     return { success: false, message: '이미 존재하는 아이디입니다.' };
   }
@@ -295,7 +398,7 @@ export const loginUserLocal = async (
   }
 
   const users = getRegisteredUsers();
-  const index = users.findIndex((u) => u.userId.toLowerCase() === trimmedId.toLowerCase());
+  const index = users.findIndex((u) => normalizeUserId(u.userId) === normalizeUserId(trimmedId));
   if (index === -1) {
     return { success: false, message: '아이디 또는 비밀번호가 일치하지 않습니다.' };
   }
@@ -350,64 +453,75 @@ export const loginUserLocal = async (
 // 4. 프로필 로드 / 저장 및 스키마 마이그레이션
 // ==========================================
 
-export const loadUserProfile = (userId?: string): Profile | null => {
-  if (typeof window === 'undefined') return null;
+export const loadUserProfileSafe = (userId?: string): StorageLoadResult<Profile> => {
+  if (typeof window === 'undefined') return { status: 'missing', data: null, rawValue: null };
   const key = getProfileKey(userId);
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      // V2 Profile 구조인지 검사
-      if (parsed && typeof parsed === 'object') {
-        // V1 LegacyProfile 호환 마이그레이션: birthDate가 있고 age가 없다면 변환
-        const legacy = parsed as LegacyUserProfile;
-        let age = parsed.age;
-        if (!age && legacy.birthDate) {
-          age = calculateAge(legacy.birthDate);
-        }
-
-        const profile: Profile = {
-          nickname: parsed.nickname || parsed.userName || (userId || '민다이어터'),
-          gender: parsed.gender === 'female' ? 'female' : 'male',
-          age: safeVal(age, DEFAULT_PROFILE.age),
-          height: safeVal(parsed.height, DEFAULT_PROFILE.height),
-          startWeight: safeVal(parsed.startWeight || parsed.weight, DEFAULT_PROFILE.startWeight),
-          targetWeight: safeVal(parsed.targetWeight, DEFAULT_PROFILE.targetWeight),
-          activity: parsed.activity || (legacy.activityLevel === 'sedentary' ? 'sedentary' : legacy.activityLevel === 'light' ? 'light' : legacy.activityLevel === 'active' ? 'active' : 'moderate'),
-          goal: parsed.goal || 'lose',
-          dietType: parsed.dietType || 'normal',
-        };
-        return profile;
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load user profile:', e);
+    raw = localStorage.getItem(key);
+  } catch (err) {
+    console.error('[storageService] getItem 예외 (프로필):', err);
+    return { status: 'error', data: null, error: err, rawValue: null };
   }
-  return null;
+
+  if (raw === null) {
+    return { status: 'missing', data: null, rawValue: null };
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { status: 'error', data: null, error: new Error('Invalid profile schema: not an object'), rawValue: raw };
+    }
+    const legacy = parsed as LegacyUserProfile;
+    let age = parsed.age;
+    if (!age && legacy.birthDate) {
+      age = calculateAge(legacy.birthDate);
+    }
+
+    const profile: Profile = {
+      nickname: parsed.nickname || parsed.userName || (userId || '민다이어터'),
+      gender: parsed.gender === 'female' ? 'female' : 'male',
+      age: safeVal(age, DEFAULT_PROFILE.age),
+      height: safeVal(parsed.height, DEFAULT_PROFILE.height),
+      startWeight: safeVal(parsed.startWeight || parsed.weight, DEFAULT_PROFILE.startWeight),
+      targetWeight: safeVal(parsed.targetWeight, DEFAULT_PROFILE.targetWeight),
+      activity: parsed.activity || (legacy.activityLevel === 'sedentary' ? 'sedentary' : legacy.activityLevel === 'light' ? 'light' : legacy.activityLevel === 'active' ? 'active' : 'moderate'),
+      goal: parsed.goal || 'lose',
+      dietType: parsed.dietType || 'normal',
+    };
+    return { status: 'ok', data: profile, rawValue: raw };
+  } catch (err) {
+    console.error('[storageService] JSON 파싱 손상 (프로필):', err);
+    return { status: 'error', data: null, error: err, rawValue: raw };
+  }
 };
 
-export const saveUserProfile = (userId: string, profile: Profile): void => {
-  if (typeof window === 'undefined') return;
+export const loadUserProfile = (userId?: string): Profile | null => {
+  const result = loadUserProfileSafe(userId);
+  return result.status === 'ok' ? result.data : null;
+};
+
+export const saveUserProfile = (userId: string, profile: Profile): StorageSaveResult => {
+  if (typeof window === 'undefined') {
+    return { ok: false, reason: 'error', error: new Error('window is undefined') };
+  }
 
   const trimmedId = userId ? userId.trim() : '';
   if (!trimmedId) {
     console.warn('[storageService] saveUserProfile 차단: 유효하지 않은 userId');
-    return;
+    return { ok: false, reason: 'guard', error: new Error('Invalid userId') };
   }
 
-  // [원자적 세션 일치 검증] 활성 세션이 있을 경우 세션 ID와 일치할 때만 저장
+  // [엄격 세션 일치 검증] 활성 세션이 반드시 존재하고 세션 ID 정규화 결과가 일치할 때만 저장 허용
   const currentSession = getSavedSession();
-  if (currentSession && currentSession.userId.toLowerCase() !== trimmedId.toLowerCase()) {
-    console.warn(`[storageService] saveUserProfile 차단: 세션 불일치 (${currentSession.userId} vs ${trimmedId})`);
-    return;
+  if (!currentSession || normalizeUserId(currentSession.userId) !== normalizeUserId(trimmedId)) {
+    console.warn(`[storageService] saveUserProfile 차단: 활성 세션 부재 또는 세션 불일치 (${currentSession?.userId ?? 'none'} vs ${trimmedId})`);
+    return { ok: false, reason: 'guard', error: new Error('Session mismatch or absent') };
   }
 
   const key = getProfileKey(trimmedId);
-  try {
-    localStorage.setItem(key, JSON.stringify(profile));
-  } catch (e) {
-    console.error('Failed to save user profile:', e);
-  }
+  return saveWithBackup(key, JSON.stringify(profile));
 };
 
 // ==========================================
@@ -444,69 +558,82 @@ export const migrateLegacyMealItems = (
   });
 };
 
-export const loadDailyLog = (userId: string, date: string): DailyLogData | null => {
-  if (typeof window === 'undefined') return null;
+export const loadDailyLogSafe = (userId: string, date: string): StorageLoadResult<DailyLogData> => {
+  if (typeof window === 'undefined') return { status: 'missing', data: null, rawValue: null };
   const key = getLogStorageKey(date, userId);
+  let raw: string | null = null;
   try {
-    const raw = localStorage.getItem(key);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        const legacyLog = parsed as LegacyDailyLog;
-        const foods: FoodEntry[] = Array.isArray(parsed.foods)
-          ? parsed.foods
-          : migrateLegacyMealItems(legacyLog.meals || [], date);
-
-        let exercises: ExerciseEntry[] = Array.isArray(parsed.exercises) ? parsed.exercises : [];
-        if (exercises.length === 0 && legacyLog.exerciseCalories && legacyLog.exerciseCalories > 0) {
-          exercises = [{
-            id: uid(),
-            date,
-            name: legacyLog.exerciseNotes || '운동',
-            kcal: legacyLog.exerciseCalories,
-          }];
-        }
-
-        const dailyData: DailyLogData = {
-          date,
-          steps: safeVal(parsed.steps, 0),
-          waterMl: safeVal(parsed.waterMl ?? legacyLog.waterIntake ?? legacyLog.water, 0),
-          targetWaterMl: safeVal(parsed.targetWaterMl, DEFAULT_TARGET_WATER),
-          foods,
-          exercises,
-          weight: parsed.weight !== undefined ? safeVal(parsed.weight, 0) : undefined,
-        };
-        return dailyData;
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load daily log:', e);
+    raw = localStorage.getItem(key);
+  } catch (err) {
+    console.error('[storageService] getItem 예외 (일일 로그):', err);
+    return { status: 'error', data: null, error: err, rawValue: null };
   }
-  return null;
+
+  if (raw === null) {
+    return { status: 'missing', data: null, rawValue: null };
+  }
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { status: 'error', data: null, error: new Error('Invalid daily log schema: not an object'), rawValue: raw };
+    }
+    const legacyLog = parsed as LegacyDailyLog;
+    const foods: FoodEntry[] = Array.isArray(parsed.foods)
+      ? parsed.foods
+      : migrateLegacyMealItems(legacyLog.meals || [], date);
+
+    let exercises: ExerciseEntry[] = Array.isArray(parsed.exercises) ? parsed.exercises : [];
+    if (exercises.length === 0 && legacyLog.exerciseCalories && legacyLog.exerciseCalories > 0) {
+      exercises = [{
+        id: uid(),
+        date,
+        name: legacyLog.exerciseNotes || '운동',
+        kcal: legacyLog.exerciseCalories,
+      }];
+    }
+
+    const dailyData: DailyLogData = {
+      date,
+      steps: safeVal(parsed.steps, 0),
+      waterMl: safeVal(parsed.waterMl ?? legacyLog.waterIntake ?? legacyLog.water, 0),
+      targetWaterMl: safeVal(parsed.targetWaterMl, DEFAULT_TARGET_WATER),
+      foods,
+      exercises,
+      weight: parsed.weight !== undefined ? safeVal(parsed.weight, 0) : undefined,
+    };
+    return { status: 'ok', data: dailyData, rawValue: raw };
+  } catch (err) {
+    console.error('[storageService] JSON 파싱 손상 (일일 로그):', err);
+    return { status: 'error', data: null, error: err, rawValue: raw };
+  }
 };
 
-export const saveDailyLog = (userId: string, date: string, data: DailyLogData): void => {
-  if (typeof window === 'undefined') return;
+export const loadDailyLog = (userId: string, date: string): DailyLogData | null => {
+  const result = loadDailyLogSafe(userId, date);
+  return result.status === 'ok' ? result.data : null;
+};
+
+export const saveDailyLog = (userId: string, date: string, data: DailyLogData): StorageSaveResult => {
+  if (typeof window === 'undefined') {
+    return { ok: false, reason: 'error', error: new Error('window is undefined') };
+  }
 
   const trimmedId = userId ? userId.trim() : '';
   if (!trimmedId) {
     console.warn('[storageService] saveDailyLog 차단: 유효하지 않은 userId');
-    return;
+    return { ok: false, reason: 'guard', error: new Error('Invalid userId') };
   }
 
-  // [원자적 세션 일치 검증] 활성 세션이 있을 경우 세션 ID와 일치할 때만 저장
+  // [엄격 세션 일치 검증] 활성 세션이 반드시 존재하고 세션 ID 정규화 결과가 일치할 때만 저장 허용
   const currentSession = getSavedSession();
-  if (currentSession && currentSession.userId.toLowerCase() !== trimmedId.toLowerCase()) {
-    console.warn(`[storageService] saveDailyLog 차단: 세션 불일치 (${currentSession.userId} vs ${trimmedId})`);
-    return;
+  if (!currentSession || normalizeUserId(currentSession.userId) !== normalizeUserId(trimmedId)) {
+    console.warn(`[storageService] saveDailyLog 차단: 활성 세션 부재 또는 세션 불일치 (${currentSession?.userId ?? 'none'} vs ${trimmedId})`);
+    return { ok: false, reason: 'guard', error: new Error('Session mismatch or absent') };
   }
 
   const key = getLogStorageKey(date, trimmedId);
-  try {
-    localStorage.setItem(key, JSON.stringify(data));
-  } catch (e) {
-    console.error('Failed to save daily log:', e);
-  }
+  return saveWithBackup(key, JSON.stringify(data));
 };
 
 export const getRecentWeightLogs = (
@@ -524,9 +651,11 @@ export const getRecentWeightLogs = (
     const cur = new Date(end);
     cur.setDate(cur.getDate() - i);
     const dateStr = `${cur.getFullYear()}-${String(cur.getMonth() + 1).padStart(2, '0')}-${String(cur.getDate()).padStart(2, '0')}`;
-    const log = loadDailyLog(userId, dateStr);
-    if (log && log.weight && log.weight > 0) {
-      results.push({ date: dateStr, weight: log.weight });
+    const logRes = loadDailyLogSafe(userId, dateStr);
+    if (logRes.status === 'ok' && logRes.data && logRes.data.weight && logRes.data.weight > 0) {
+      results.push({ date: dateStr, weight: logRes.data.weight });
+    } else if (logRes.status === 'error') {
+      console.warn(`[storageService] 체중 조회 중 일일 로그 손상 감지 (date: ${dateStr}) - 덮어쓰지 않고 안전 스킵`);
     }
   }
 

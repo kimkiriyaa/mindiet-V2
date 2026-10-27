@@ -7,6 +7,7 @@ import {
   saveUserProfile,
   loadDailyLog,
   getProfileKey,
+  setSavedSession,
 } from '@/services/storageService';
 
 describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간 연동 검증', () => {
@@ -23,6 +24,7 @@ describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간
   it('1. 식단 추가 및 수량 곱셈 실시간 반영 검증 (120kcal * 3 = 360kcal)', async () => {
     // 1) 사용자 등록 및 프로필 설정
     await registerUserLocal('testUser', 'pass123', '테스터');
+    setSavedSession({ userId: 'testUser', userName: '테스터' });
     const profile: Profile = {
       ...DEFAULT_PROFILE,
       nickname: '테스터',
@@ -80,6 +82,7 @@ describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간
 
   it('2. 식단 수량 조절(+/-) 및 자동 삭제, 수동 삭제 검증', async () => {
     await registerUserLocal('testUser', 'pass123', '테스터');
+    setSavedSession({ userId: 'testUser', userName: '테스터' });
     saveUserProfile('testUser', { ...DEFAULT_PROFILE, nickname: '테스터' });
 
     const { result } = renderHook(() => useDiet(), { wrapper });
@@ -154,6 +157,7 @@ describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간
   it('3. 체중 입력에 따른 일일 목표 칼로리(Mifflin-St Jeor TDEE) 실시간 재계산 검증', async () => {
     // 남성 30세, 175cm, 보통 활동(1.55), 감량(-500)
     await registerUserLocal('testUser', 'pass123', '테스터');
+    setSavedSession({ userId: 'testUser', userName: '테스터' });
     const profile: Profile = {
       nickname: '테스터',
       gender: 'male',
@@ -201,6 +205,7 @@ describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간
 
   it('4. 운동 및 걸음 수 CRUD 및 활동 소모량(Burned) 합산 검증', async () => {
     await registerUserLocal('testUser', 'pass123', '테스터');
+    setSavedSession({ userId: 'testUser', userName: '테스터' });
     saveUserProfile('testUser', {
       ...DEFAULT_PROFILE,
       nickname: '테스터',
@@ -250,6 +255,7 @@ describe('Phase 3: 식단·운동·체중 실데이터 CRUD 및 계산 실시간
 
   it('5. 체중 기록 후 다른 데이터(식단/걸음/물) 수정 시 체중 유실 방지(데이터 무결성) 검증', async () => {
     await registerUserLocal('testUser', 'pass123', '테스터');
+    setSavedSession({ userId: 'testUser', userName: '테스터' });
     saveUserProfile('testUser', {
       ...DEFAULT_PROFILE,
       nickname: '테스터',
