@@ -24,7 +24,7 @@ describe("홈 탭 확정 UI 레이아웃 및 컴포넌트 실시간 연동 검�
       gender: "male",
       height: 175,
       age: 30,
-      activityLevel: "moderate",
+      activity: "moderate",
     };
     saveUserProfile("tester", profile);
   });
@@ -138,17 +138,18 @@ describe("홈 탭 확정 UI 레이아웃 및 컴포넌트 실시간 연동 검�
 
     // 기본 탭은 '식단 기록'이 활성화되어 있어야 함
     expect(screen.getByText("오늘의 끼니 현황")).toBeInTheDocument();
-    expect(screen.queryByText("활동 및 운동 기록")).not.toBeInTheDocument();
+    expect(screen.queryByText("오늘의 걸음 수")).not.toBeInTheDocument();
     expect(screen.queryByText("수분 섭취")).not.toBeInTheDocument();
 
     // '바디 & 활동' 탭 클릭
     const bodyTabButton = screen.getByRole("button", { name: /바디 & 활동/ });
     fireEvent.click(bodyTabButton);
 
-    // 바디 & 활동 컴포넌트들(걸음수/운동, 수분, 체중)이 렌더링되고 식단 그리드는 사라져야 함
-    expect(screen.getByText("활동 및 운동 기록")).toBeInTheDocument();
+    // B안 바디 & 활동 4개 독립 카드(걸음수, 운동종목, 수분, 체중트렌드) 렌더링 확인
+    expect(screen.getByText("오늘의 걸음 수")).toBeInTheDocument();
+    expect(screen.getByText("운동 종목")).toBeInTheDocument();
     expect(screen.getByText("수분 섭취")).toBeInTheDocument();
-    expect(screen.getByText("체중 기록")).toBeInTheDocument();
+    expect(screen.getByText("체중 트렌드")).toBeInTheDocument();
     expect(screen.getByText("+1,000보")).toBeInTheDocument();
     expect(screen.queryByText("오늘의 끼니 현황")).not.toBeInTheDocument();
 
@@ -158,7 +159,7 @@ describe("홈 탭 확정 UI 레이아웃 및 컴포넌트 실시간 연동 검�
 
     // 다시 식단 그리드가 나타남
     expect(screen.getByText("오늘의 끼니 현황")).toBeInTheDocument();
-    expect(screen.queryByText("활동 및 운동 기록")).not.toBeInTheDocument();
+    expect(screen.queryByText("오늘의 걸음 수")).not.toBeInTheDocument();
   });
 
   it("Test (d): 2x2 끼니 카드 클릭 상호작용 (미입력 -> 모달 호출, 입력됨 -> 바텀 시트 열림 및 수량 조절)", async () => {

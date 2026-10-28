@@ -13,9 +13,7 @@ import { useDiet } from "@/context/DietContext";
 import { fromDateKey, shiftDateKey, sumFoods, toLocalDateKey } from "@/lib/diet";
 import { SummaryCard } from "./SummaryCard";
 import { MealCardsGrid } from "./MealCardsGrid";
-import { WaterCard } from "./WaterCard";
-import { ExerciseCard } from "./ExerciseCard";
-import { WeightCard } from "./WeightCard";
+import { BodyActivityView } from "./BodyActivityView";
 
 const DOW = ["일", "월", "화", "수", "목", "금", "토"];
 
@@ -134,11 +132,7 @@ export function HomeTab() {
       {activeSegment === "meals" ? (
         <MealCardsGrid />
       ) : (
-        <div className="space-y-4 animate-in fade-in-50 duration-200">
-          <ExerciseCard />
-          <WaterCard />
-          <WeightCard />
-        </div>
+        <BodyActivityView />
       )}
     </div>
   );
