@@ -23,3 +23,12 @@ Object.defineProperty(window, "matchMedia", {
 if (typeof HTMLCanvasElement !== "undefined") {
   HTMLCanvasElement.prototype.getContext = () => null;
 }
+
+// jsdom 환경에서 ResizeObserver 미구현 방어 (Recharts 등)
+if (typeof window !== "undefined" && !window.ResizeObserver) {
+  window.ResizeObserver = class ResizeObserver {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+}

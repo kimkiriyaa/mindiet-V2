@@ -1,4 +1,4 @@
-import { Droplets, Plus, RotateCcw } from 'lucide-react';
+import { Droplets, Minus, Plus, RotateCcw } from 'lucide-react';
 import { useDiet } from '@/context/DietContext';
 
 export function WaterCard() {
@@ -52,12 +52,21 @@ export function WaterCard() {
         </div>
       </div>
 
-      {/* 빠른 추가 버튼들 */}
-      <div className="grid grid-cols-2 gap-2 pt-0.5">
+      {/* 빠른 추가 및 차감 버튼들 */}
+      <div className="grid grid-cols-3 gap-2 pt-0.5">
+        <button
+          type="button"
+          onClick={() => addWater(-250)}
+          disabled={waterMl <= 0}
+          className="flex items-center justify-center gap-1 rounded-xl bg-secondary hover:bg-rose-50 hover:text-rose-600 px-2 py-2 text-xs font-semibold transition active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
+        >
+          <Minus className="h-3.5 w-3.5" />
+          <span>-250 ml</span>
+        </button>
         <button
           type="button"
           onClick={() => addWater(250)}
-          className="flex items-center justify-center gap-1 rounded-xl bg-secondary hover:bg-sky-50 hover:text-sky-600 px-3 py-2 text-xs font-semibold transition active:scale-95"
+          className="flex items-center justify-center gap-1 rounded-xl bg-secondary hover:bg-sky-50 hover:text-sky-600 px-2 py-2 text-xs font-semibold transition active:scale-95"
         >
           <Plus className="h-3.5 w-3.5" />
           <span>+250 ml (1컵)</span>
@@ -65,7 +74,7 @@ export function WaterCard() {
         <button
           type="button"
           onClick={() => addWater(500)}
-          className="flex items-center justify-center gap-1 rounded-xl bg-secondary hover:bg-sky-50 hover:text-sky-600 px-3 py-2 text-xs font-semibold transition active:scale-95"
+          className="flex items-center justify-center gap-1 rounded-xl bg-secondary hover:bg-sky-50 hover:text-sky-600 px-2 py-2 text-xs font-semibold transition active:scale-95"
         >
           <Plus className="h-3.5 w-3.5" />
           <span>+500 ml (1병)</span>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { Toaster } from "@/components/ui/sonner";
 import { DietProvider, useDiet } from "@/context/DietContext";
 import { BottomTabBar, type TabKey } from "@/components/diet/BottomTabBar";
@@ -102,6 +102,12 @@ export function App() {
 export function Index() {
   return (
     <div className="min-h-screen bg-canvas">
+      {import.meta.env.DEV && (
+        <aside className="bg-emerald-600 text-white text-xs font-bold py-1.5 px-4 text-center sticky top-0 z-50 shadow-xs flex items-center justify-center gap-2">
+          <span>🎨 홈 탭 UI 개선 3대 시안 실시간 비교:</span>
+          <Link to="/design-preview" className="underline hover:opacity-90 font-extrabold bg-emerald-700/80 px-2 py-0.5 rounded">시안 보러가기 →</Link>
+        </aside>
+      )}
       <div className="mx-auto min-h-screen w-full max-w-[480px] bg-background shadow-sm">
         <DietProvider><App /></DietProvider>
       </div>

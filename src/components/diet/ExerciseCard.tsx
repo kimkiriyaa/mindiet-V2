@@ -82,8 +82,8 @@ export function ExerciseCard() {
         </span>
       </div>
 
-      {/* 1. 오늘의 걸음 수 입력란 */}
-      <div className="rounded-2xl bg-secondary p-3.5 space-y-2">
+      {/* 1. 오늘의 걸음 수 및 퀵 버튼 */}
+      <div className="rounded-2xl bg-secondary p-3.5 space-y-2.5">
         <div className="flex items-center justify-between">
           <span className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
             <Footprints className="h-4 w-4 text-orange-500" />
@@ -93,7 +93,37 @@ export function ExerciseCard() {
             -{stepCalories.toLocaleString()} kcal
           </span>
         </div>
-        <div className="flex items-center gap-2">
+
+        {/* 걸음 수 현황 및 +1,000보 퀵 버튼 */}
+        <div className="flex items-baseline justify-between">
+          <span className="text-2xl font-black tabular-nums text-foreground">
+            {(steps || 0).toLocaleString()}{" "}
+            <span className="text-xs font-normal text-muted-foreground">/ 10,000보</span>
+          </span>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              const next = (steps || 0) + 1000;
+              setSteps(next);
+            }}
+            className="h-7 text-xs font-semibold px-2.5 bg-background hover:bg-orange-50 hover:text-orange-600 transition"
+          >
+            +1,000보
+          </Button>
+        </div>
+
+        {/* 걸음 수 프로그레스 바 */}
+        <div className="h-2 w-full rounded-full bg-background overflow-hidden">
+          <div
+            className="h-full bg-orange-500 rounded-full transition-all duration-300"
+            style={{ width: `${Math.min(100, (((steps || 0) / 10000) * 100))}%` }}
+          />
+        </div>
+
+        {/* 수동 걸음 수 입력 폼 */}
+        <div className="flex items-center gap-2 pt-1">
           <Input
             type="number"
             min="0"
@@ -107,14 +137,14 @@ export function ExerciseCard() {
                 handleSaveSteps();
               }
             }}
-            className="h-10 flex-1 bg-background text-sm font-semibold"
+            className="h-9 flex-1 bg-background text-sm font-semibold"
           />
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={handleSaveSteps}
-            className="h-10 px-3 text-xs font-bold shrink-0"
+            className="h-9 px-3 text-xs font-bold shrink-0"
           >
             저장
           </Button>
