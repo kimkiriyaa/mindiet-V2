@@ -32,10 +32,60 @@ export interface ExerciseVisionResult {
   source: NutritionSource;
 }
 
-const GEMINI_API_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
+// ==========================================
+// 1. 모델·타임아웃·크기 관련 상수 (한 곳에서 일원화 관리)
+// ==========================================
+export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
+export const DEFAULT_GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
+export const SERVER_GEMINI_TIMEOUT_MS = 20000; // 20초 (서버 -> Gemini)
+export const CLIENT_GEMINI_TIMEOUT_MS = 25000; // 25초 (클라이언트 대기 상한)
+export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB (Vercel 4.5MB 상한 준수)
+
+export const STANDARD_PORTION_PROMPT =
+  "한국 일반 음식점 1인분 표준 서빙량 기준으로 정수로 추정하고, 확신이 낮으면 보수적으로";
+
+// ==========================================
+// 2. responseSchema 정의 (출력 스키마 강제)
+// ==========================================
+export const FOOD_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    name: { type: "STRING", description: "음식명" },
+    quantity: { type: "NUMBER", description: "총 섭취 수량/분량" },
+    unit: { type: "STRING", description: "단위 (인분, 개, 그릇 등)" },
+    unitKcal: { type: "INTEGER", description: "1단위당 칼로리 (kcal)" },
+    unitCarb: { type: "NUMBER", description: "1단위당 탄수화물 (g)" },
+    unitProtein: { type: "NUMBER", description: "1단위당 단백질 (g)" },
+    unitFat: { type: "NUMBER", description: "1단위당 지방 (g)" },
+    description: { type: "STRING", description: "조리법 및 주요 식재료 간단 설명" },
+  },
+  required: ["name", "quantity", "unit", "unitKcal", "unitCarb", "unitProtein", "unitFat"],
+};
+
+export const EXERCISE_RESPONSE_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    calories: { type: "INTEGER", description: "총 예상 소모 칼로리 (kcal)" },
+    description: { type: "STRING", description: "운동 강도 및 소모 칼로리 산출 설명" },
+  },
+  required: ["calories"],
+};
 
 /**
- * 1. 이미지 입력값 유효성 검증 헬퍼 (5MB 이하, jpeg/png/webp)
+ * 3. thinking 설정 생성 헬퍼 (공식 문서: ai.google.dev/gemini-api/docs/thinking)
+ * - 2.x 세대: thinkingBudget(0) (수치형 토큰 버짓)
+ * - 3.x 세대: thinkingLevel("minimal" 기본, 환경변수로 지정 가능)
+ */
+export function buildThinkingConfig(model: string, customLevel?: string) {
+  if (model.startsWith("gemini-2.")) {
+    return { thinkingBudget: 0 };
+  }
+  const level = (customLevel || "minimal").toLowerCase();
+  return { thinkingLevel: level };
+}
+
+/**
+ * 4. 이미지 입력값 유효성 검증 헬퍼 (4MB 이하, jpeg/png/webp)
  */
 export function validateImagePayload(imageDataUrl: string): { mimeType: string; rawBase64: string } {
   if (!imageDataUrl || typeof imageDataUrl !== "string") {
@@ -52,27 +102,26 @@ export function validateImagePayload(imageDataUrl: string): { mimeType: string; 
     throw new Error("지원하지 않는 이미지 형식입니다. JPEG, PNG, WEBP 이미지만 지원합니다.");
   }
 
-  // Base64 추출 및 크기 검사 (최대 5MB)
+  // Base64 추출 및 크기 검사 (최대 4MB)
   const splitIndex = imageDataUrl.indexOf(",");
   const rawBase64 = splitIndex !== -1 ? imageDataUrl.slice(splitIndex + 1).trim() : imageDataUrl.trim();
 
   // 대략적인 바이트 크기: (base64 길이의 3/4)
   const approxBytes = Math.ceil((rawBase64.length * 3) / 4);
-  const maxBytes = 5 * 1024 * 1024; // 5MB = 5,242,880 bytes
-  if (approxBytes > maxBytes) {
-    throw new Error("이미지 크기는 5MB 이하여야 합니다.");
+  if (approxBytes > MAX_IMAGE_BYTES) {
+    throw new Error("이미지 크기는 4MB 이하여야 합니다. [ERR_PAYLOAD_TOO_LARGE]");
   }
 
   return { mimeType, rawBase64 };
 }
 
 /**
- * 2. 12초 타임아웃 fetch 헬퍼 (오류 마스킹 적용)
+ * 5. 타임아웃 fetch 헬퍼 (오류 마스킹 적용)
  */
 export async function fetchWithTimeout(
   url: string,
   options: RequestInit,
-  timeoutMs = 12000
+  timeoutMs = SERVER_GEMINI_TIMEOUT_MS
 ): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -84,11 +133,129 @@ export async function fetchWithTimeout(
     return res;
   } catch (err: any) {
     if (err?.name === "AbortError" || err?.message?.includes("aborted")) {
-      throw new Error("AI 분석 서버 응답 시간이 초과되었습니다 (12초 타임아웃). [ERR_TIMEOUT]");
+      throw new Error(`AI 분석 서버 응답 시간이 초과되었습니다 (${Math.round(timeoutMs / 1000)}초 타임아웃). [ERR_TIMEOUT]`);
     }
     throw new Error("식단 분석에 실패했습니다. 네트워크 상태를 확인해 주세요. [ERR_NETWORK]");
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * 6. 모델 호출 및 404/종료 시 폴백 재시도 공통 헬퍼
+ * - 사진, 텍스트, 운동 서버 함수가 모두 이 헬퍼를 거침
+ * - 주 모델 404 / no longer available 시 폴백 모델로 1회 재시도
+ * - 서버 로그에는 HTTP 상태, 모델 ID, 소요 ms만 기록 (키, 헤더, 응답 본문 기록 금지)
+ */
+export async function callGeminiWithFallback(params: {
+  apiKey: string;
+  contents: any[];
+  responseSchema: any;
+  maxOutputTokens: number;
+}): Promise<any> {
+  const env = getServerEnv();
+  const primaryModel = env.GEMINI_MODEL || DEFAULT_GEMINI_MODEL;
+  const fallbackModel = env.GEMINI_MODEL_FALLBACK || DEFAULT_GEMINI_MODEL_FALLBACK;
+  const thinkingLevel = env.GEMINI_THINKING_LEVEL;
+
+  const tryCall = async (modelId: string) => {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
+    const requestBody = {
+      contents: params.contents,
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: params.maxOutputTokens,
+        responseMimeType: "application/json",
+        responseSchema: params.responseSchema,
+        thinkingConfig: buildThinkingConfig(modelId, thinkingLevel),
+      },
+    };
+
+    const startTime = Date.now();
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(
+        endpoint,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": params.apiKey,
+          },
+          body: JSON.stringify(requestBody),
+        },
+        SERVER_GEMINI_TIMEOUT_MS
+      );
+    } catch (fetchErr) {
+      const durationMs = Date.now() - startTime;
+      console.log(`[geminiServerFn] status=NETWORK_ERROR model=${modelId} duration=${durationMs}ms`);
+      throw fetchErr;
+    }
+
+    const durationMs = Date.now() - startTime;
+    console.log(`[geminiServerFn] status=${res.status} model=${modelId} duration=${durationMs}ms`);
+
+    return { res, modelId };
+  };
+
+  // 1차 시도 (주 모델)
+  let { res, modelId } = await tryCall(primaryModel);
+
+  // 404 / 410 또는 no longer available 여부 확인
+  let isUnavailable = res.status === 404 || res.status === 410;
+  if (!res.ok && !isUnavailable) {
+    try {
+      const errClone = res.clone();
+      const errText = await errClone.text();
+      if (/no longer available|not found|is not supported/i.test(errText)) {
+        isUnavailable = true;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // 404/종료인 경우 폴백 모델로 1회 재시도 (주 모델과 폴백 모델이 다를 때)
+  if (isUnavailable && fallbackModel && fallbackModel !== primaryModel) {
+    const fallbackResult = await tryCall(fallbackModel);
+    res = fallbackResult.res;
+    modelId = fallbackResult.modelId;
+
+    if (res.status === 404 || res.status === 410) {
+      throw new Error("선택한 모델을 사용할 수 없습니다. [ERR_MODEL_UNAVAILABLE]");
+    }
+  } else if (isUnavailable) {
+    throw new Error("선택한 모델을 사용할 수 없습니다. [ERR_MODEL_UNAVAILABLE]");
+  }
+
+  // 결과 검증
+  if (!res.ok) {
+    if (res.status === 404 || res.status === 410) {
+      throw new Error("선택한 모델을 사용할 수 없습니다. [ERR_MODEL_UNAVAILABLE]");
+    }
+    if (res.status === 429) {
+      throw new Error("일시적인 요청 한도 초과입니다. 잠시 후 다시 시도해 주세요. [ERR_RATE_LIMIT]");
+    }
+    throw new Error("식단 분석에 실패했습니다. 다시 시도해 주세요. [ERR_UPSTREAM_FAIL]");
+  }
+
+  let candidateText: string | undefined;
+  try {
+    const json = await res.json();
+    candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+  } catch {
+    throw new Error("식단 분석 결과를 처리하지 못했습니다. [ERR_PARSE_FAIL]");
+  }
+
+  if (!candidateText) {
+    throw new Error("식단 분석 결과를 전달받지 못했습니다. [ERR_EMPTY_RESPONSE]");
+  }
+
+  const cleaned = candidateText.replace(/```json/g, "").replace(/```/g, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    throw new Error("식단 분석 데이터 형식이 올바르지 않습니다. [ERR_INVALID_SCHEMA]");
   }
 }
 
@@ -100,7 +267,7 @@ export async function checkGeminiHealthHandler(): Promise<{ configured: boolean 
 }
 
 /**
- * [Handler 2] 사진 음식 분석 핸들러 (gemini-2.5-flash)
+ * [Handler 2] 사진 음식 분석 핸들러
  */
 export async function analyzeMealPhotoHandler(data: {
   image: string;
@@ -120,82 +287,43 @@ export async function analyzeMealPhotoHandler(data: {
 1. 사진 속 각 음식의 총 수량/개수(예: 삶은 달걀 3개면 3개 전체 분량, 만두 6개면 6개 전체, 밥 한 공기 반이면 1.5공기)를 반드시 정확히 파악하라.
 2. 단위 1개당 영양소가 아니라, 사진에 보이는 전체 섭취량 기준의 총 수량(quantity)을 반영하여 "총 칼로리 = 개당 칼로리 × quantity" 및 총 탄/단/지를 계산하라.
 3. 250kcal 같은 임의 고정값을 절대 사용하지 말 것. 식재료와 조리 형태(튀김, 볶음, 찜, 구이, 국물 등), 총 섭취 분량을 종합하여 가장 합리적이고 정확한 추정치를 직접 계산하여 반환하라.
-4. 반드시 아래 JSON 형식으로만 순수 텍스트로 응답하라 (코드블록 마크다운 기호 없이 순수 JSON만 반환):
-{"name": string, "quantity": number, "unit": string, "calories": number, "carbs": number, "protein": number, "fat": number, "description": string}
+4. ${STANDARD_PORTION_PROMPT}.
 ${notesContext}`.trim();
 
-  const requestBody = {
-    contents: [
-      {
-        parts: [
-          { text: promptRules },
-          {
-            inline_data: {
-              mime_type: mimeType,
-              data: rawBase64,
-            },
-          },
-        ],
-      },
-    ],
-    generationConfig: {
-      temperature: 0.1,
-      maxOutputTokens: 300,
-      responseMimeType: "application/json",
-      thinkingConfig: { thinkingBudget: 0 },
-    },
-  };
-
-  const response = await fetchWithTimeout(
-    GEMINI_API_ENDPOINT,
+  const contents = [
     {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
-      body: JSON.stringify(requestBody),
+      parts: [
+        { text: promptRules },
+        {
+          inline_data: {
+            mime_type: mimeType,
+            data: rawBase64,
+          },
+        },
+      ],
     },
-    12000
-  );
+  ];
 
-  if (!response.ok) {
-    if (response.status === 429) {
-      throw new Error("일시적인 요청 한도 초과입니다. 잠시 후 다시 시도해 주세요. [ERR_RATE_LIMIT]");
-    }
-    throw new Error("식단 분석에 실패했습니다. 다시 시도해 주세요. [ERR_UPSTREAM_FAIL]");
-  }
-
-  let candidateText: string | undefined;
-  try {
-    const json = await response.json();
-    candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-  } catch {
-    throw new Error("식단 분석 결과를 처리하지 못했습니다. [ERR_PARSE_FAIL]");
-  }
-
-  if (!candidateText) {
-    throw new Error("식단 분석 결과를 전달받지 못했습니다. [ERR_EMPTY_RESPONSE]");
-  }
-
-  const cleaned = candidateText.replace(/```json/g, "").replace(/```/g, "").trim();
-  let parsed: any;
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    throw new Error("식단 분석 데이터 형식이 올바르지 않습니다. [ERR_INVALID_SCHEMA]");
-  }
+  const parsed = await callGeminiWithFallback({
+    apiKey,
+    contents,
+    responseSchema: FOOD_RESPONSE_SCHEMA,
+    maxOutputTokens: 350,
+  });
 
   const qty = Math.max(0.5, Number(parsed.quantity) || 1);
-  const totalCal = Math.max(0, Math.round(Number(parsed.calories) || 0));
-  const totalCarb = Math.max(0, Math.round(Number(parsed.carbs) || 0));
-  const totalProtein = Math.max(0, Math.round(Number(parsed.protein) || 0));
-  const totalFat = Math.max(0, Math.round(Number(parsed.fat) || 0));
+  // unitKcal 필드 우선, 없을 경우 calories에서 계산
+  let unitKcal = 0;
+  if (parsed.unitKcal != null && Number.isFinite(Number(parsed.unitKcal))) {
+    unitKcal = Math.max(0, Math.round(Number(parsed.unitKcal)));
+  } else if (parsed.calories != null && Number.isFinite(Number(parsed.calories))) {
+    unitKcal = Math.round(Number(parsed.calories) / qty);
+  }
 
-  const unitKcal = Math.round(totalCal / qty);
-  const unitCarb = Math.round((totalCarb / qty) * 10) / 10;
-  const unitProtein = Math.round((totalProtein / qty) * 10) / 10;
-  const unitFat = Math.round((totalFat / qty) * 10) / 10;
+  const totalCal = Math.round(unitKcal * qty);
+  const unitCarb = Math.max(0, Math.round((Number(parsed.unitCarb) || (parsed.carbs ? Number(parsed.carbs) / qty : 0)) * 10) / 10);
+  const unitProtein = Math.max(0, Math.round((Number(parsed.unitProtein) || (parsed.protein ? Number(parsed.protein) / qty : 0)) * 10) / 10);
+  const unitFat = Math.max(0, Math.round((Number(parsed.unitFat) || (parsed.fat ? Number(parsed.fat) / qty : 0)) * 10) / 10);
 
   return {
     name: String(parsed.name || "식단").trim(),
@@ -246,68 +374,49 @@ export async function estimateFoodTextHandler(data: { text: string }): Promise<F
     }
   }
 
-  // 2. Gemini 2.5 Flash 호출 (API 키가 있을 때, 성공 시 source: 'ai')
+  // 2. Gemini 호출 (API 키가 있을 때, 성공 시 source: 'ai')
   const env = getServerEnv();
   const apiKey = env.GEMINI_API_KEY;
   if (apiKey) {
     try {
       const prompt = `음식명: "${trimmed}"
-반드시 음식의 조리 방식, 주재료 구성, 총 분량/수량(예: ${quantity}${unit || "개"})을 엄밀히 반영하여 총 칼로리와 영양성분을 계산하라.
-단위 1개가 아닌 사용자가 입력한 총량 전체의 칼로리(총 칼로리 = 단위 칼로리 × 수량)와 탄수화물, 단백질, 지방을 계산하라.
-250kcal 같은 임의 고정값을 절대 넣지 말고 식재료와 조리 형태에 맞는 실제적인 추정치를 JSON 형식으로만 응답하라:
-{"name":"${trimmed}","quantity":${quantity},"unit":"${unit || "인분"}","calories":number,"carbs":number,"protein":number,"fat":number,"description":string}`;
+반드시 음식의 조리 방식, 주재료 구성, 총 분량/수량(예: ${quantity}${unit || "개"})을 엄밀히 반영하여 1단위당 및 총 칼로리와 영양성분을 계산하라.
+250kcal 같은 임의 고정값을 절대 넣지 말고 식재료와 조리 형태에 맞는 실제적인 추정치를 JSON 형식으로 응답하라.
+${STANDARD_PORTION_PROMPT}.`;
 
-      const requestBody = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 200,
-          responseMimeType: "application/json",
-          thinkingConfig: { thinkingBudget: 0 },
-        },
-      };
+      const contents = [{ parts: [{ text: prompt }] }];
+      const parsed = await callGeminiWithFallback({
+        apiKey,
+        contents,
+        responseSchema: FOOD_RESPONSE_SCHEMA,
+        maxOutputTokens: 250,
+      });
 
-      const response = await fetchWithTimeout(
-        GEMINI_API_ENDPOINT,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": apiKey,
-          },
-          body: JSON.stringify(requestBody),
-        },
-        12000
-      );
-
-      if (response.ok) {
-        const json = await response.json();
-        const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (candidateText) {
-          const cleaned = candidateText.replace(/```json/g, "").replace(/```/g, "").trim();
-          const parsed = JSON.parse(cleaned);
-
-          const q = Math.max(0.5, Number(parsed.quantity) || quantity);
-          const totalCal = Math.max(0, Math.round(Number(parsed.calories) || 0));
-          const totalCarb = Math.max(0, Math.round(Number(parsed.carbs) || 0));
-          const totalProtein = Math.max(0, Math.round(Number(parsed.protein) || 0));
-          const totalFat = Math.max(0, Math.round(Number(parsed.fat) || 0));
-
-          return {
-            name: String(parsed.name || trimmed).trim(),
-            quantity: q,
-            unit: parsed.unit ? String(parsed.unit).trim() : unit || "인분",
-            unitKcal: Math.round(totalCal / q),
-            unitCarb: Math.round((totalCarb / q) * 10) / 10,
-            unitProtein: Math.round((totalProtein / q) * 10) / 10,
-            unitFat: Math.round((totalFat / q) * 10) / 10,
-            totalKcal: totalCal,
-            description: parsed.description ? String(parsed.description).trim() : undefined,
-            isEstimate: false,
-            source: "ai",
-          };
-        }
+      const q = Math.max(0.5, Number(parsed.quantity) || quantity);
+      let unitKcal = 0;
+      if (parsed.unitKcal != null && Number.isFinite(Number(parsed.unitKcal))) {
+        unitKcal = Math.max(0, Math.round(Number(parsed.unitKcal)));
+      } else if (parsed.calories != null && Number.isFinite(Number(parsed.calories))) {
+        unitKcal = Math.round(Number(parsed.calories) / q);
       }
+      const totalCal = Math.round(unitKcal * q);
+      const unitCarb = Math.max(0, Math.round((Number(parsed.unitCarb) || (parsed.carbs ? Number(parsed.carbs) / q : 0)) * 10) / 10);
+      const unitProtein = Math.max(0, Math.round((Number(parsed.unitProtein) || (parsed.protein ? Number(parsed.protein) / q : 0)) * 10) / 10);
+      const unitFat = Math.max(0, Math.round((Number(parsed.unitFat) || (parsed.fat ? Number(parsed.fat) / q : 0)) * 10) / 10);
+
+      return {
+        name: String(parsed.name || trimmed).trim(),
+        quantity: q,
+        unit: parsed.unit ? String(parsed.unit).trim() : unit || "인분",
+        unitKcal,
+        unitCarb,
+        unitProtein,
+        unitFat,
+        totalKcal: totalCal,
+        description: parsed.description ? String(parsed.description).trim() : undefined,
+        isEstimate: false,
+        source: "ai",
+      };
     } catch (err: any) {
       const errCode = err?.message?.match(/\[ERR_[A-Z_]+\]/)?.[0] || "[ERR_UPSTREAM_FAIL]";
       console.warn(`[geminiServerFn] 텍스트 분석 API 실패 ${errCode}, 자체 추정으로 대체`);
@@ -365,52 +474,28 @@ export async function estimateExerciseCaloriesHandler(data: {
     }
   }
 
-  // 2. Gemini 2.5 Flash 호출 (API 키가 있을 때, 성공 시 source: 'ai')
+  // 2. Gemini 호출 (API 키가 있을 때, 성공 시 source: 'ai')
   const env = getServerEnv();
   const apiKey = env.GEMINI_API_KEY;
   if (apiKey) {
     try {
-      const prompt = `체중: ${safeWeight}kg, 운동: "${trimmed}". 운동 강도와 시간을 종합해 소모 칼로리를 정확히 계산하라. JSON으로만 반환: {"calories": number, "description": string}`;
+      const prompt = `체중: ${safeWeight}kg, 운동: "${trimmed}". 운동 강도와 시간(${durationMinutes}분)을 종합해 소모 칼로리를 정수로 정확히 계산하라.`;
+      const contents = [{ parts: [{ text: prompt }] }];
+      const parsed = await callGeminiWithFallback({
+        apiKey,
+        contents,
+        responseSchema: EXERCISE_RESPONSE_SCHEMA,
+        maxOutputTokens: 150,
+      });
 
-      const requestBody = {
-        contents: [{ parts: [{ text: prompt }] }],
-        generationConfig: {
-          temperature: 0.1,
-          maxOutputTokens: 150,
-          responseMimeType: "application/json",
-          thinkingConfig: { thinkingBudget: 0 },
-        },
+      return {
+        name: trimmed,
+        durationMinutes,
+        calories: Math.max(0, Math.round(Number(parsed.calories) || 0)),
+        description: parsed.description ? String(parsed.description).trim() : `${trimmed} 예상 소모량`,
+        isEstimate: false,
+        source: "ai",
       };
-
-      const response = await fetchWithTimeout(
-        GEMINI_API_ENDPOINT,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": apiKey,
-          },
-          body: JSON.stringify(requestBody),
-        },
-        12000
-      );
-
-      if (response.ok) {
-        const json = await response.json();
-        const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (candidateText) {
-          const cleaned = candidateText.replace(/```json/g, "").replace(/```/g, "").trim();
-          const parsed = JSON.parse(cleaned);
-          return {
-            name: trimmed,
-            durationMinutes,
-            calories: Math.max(0, Math.round(Number(parsed.calories) || 0)),
-            description: parsed.description ? String(parsed.description).trim() : `${trimmed} 예상 소모량`,
-            isEstimate: false,
-            source: "ai",
-          };
-        }
-      }
     } catch (err: any) {
       const errCode = err?.message?.match(/\[ERR_[A-Z_]+\]/)?.[0] || "[ERR_UPSTREAM_FAIL]";
       console.warn(`[geminiServerFn] 운동 추정 API 실패 ${errCode}, MET 5.0 기본 공식 적용`);
@@ -437,7 +522,7 @@ export const checkGeminiHealthFn = createServerFn({ method: "GET" }).handler(
 );
 
 /**
- * [ServerFn 2] 사진 음식 분석 서버 함수 (gemini-2.5-flash)
+ * [ServerFn 2] 사진 음식 분석 서버 함수
  */
 export const analyzeMealPhotoFn = createServerFn({ method: "POST" })
   .validator((data: { image: string; userNotes?: string | undefined }) => data)
@@ -451,7 +536,7 @@ export const estimateFoodTextFn = createServerFn({ method: "POST" })
   .handler(async ({ data }) => estimateFoodTextHandler(data));
 
 /**
- * [ServerFn 4] 운동 칼로리 소모량 추정 서버 함수 (MET 5.0 기본 공식 / Gemini 2.5 Flash)
+ * [ServerFn 4] 운동 칼로리 소모량 추정 서버 함수
  */
 export const estimateExerciseCaloriesFn = createServerFn({ method: "POST" })
   .validator((data: { text: string; weight?: number | undefined }) => data)

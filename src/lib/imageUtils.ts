@@ -2,6 +2,9 @@
  * 클라이언트 측 이미지 압축 및 리사이징 유틸리티
  */
 
+export const MAX_EDGE = 1024;
+export const JPEG_QUALITY = 0.75;
+
 export const fileToDataUrl = (file: File): Promise<string> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -13,8 +16,8 @@ export const fileToDataUrl = (file: File): Promise<string> => {
 
 export const resizeAndCompressImage = (
   dataUrl: string,
-  maxDimension = 1024,
-  quality = 0.75
+  maxDimension = MAX_EDGE,
+  quality = JPEG_QUALITY
 ): Promise<string> => {
   return new Promise((resolve) => {
     if (typeof window === "undefined" || typeof document === "undefined") {

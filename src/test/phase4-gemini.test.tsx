@@ -87,13 +87,13 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(res.rawBase64.length).toBeGreaterThan(0);
     });
 
-    it("5MB를 초과하는 대용량 이미지 업로드 시 크기 제한 에러 발생", () => {
-      // 5MB = 5 * 1024 * 1024 = 5,242,880 bytes.
-      // Base64 문자열 약 7,000,000자 생성 (~5.25MB)
-      const oversizedBase64 = "A".repeat(7000000);
+    it("4MB를 초과하는 대용량 이미지 업로드 시 크기 제한 에러 발생", () => {
+      // 4MB = 4 * 1024 * 1024 = 4,194,304 bytes.
+      // Base64 문자열 약 6,000,000자 생성 (~4.5MB)
+      const oversizedBase64 = "A".repeat(6000000);
       const oversizedDataUrl = `data:image/jpeg;base64,${oversizedBase64}`;
       expect(() => validateImagePayload(oversizedDataUrl)).toThrow(
-        "이미지 크기는 5MB 이하여야 합니다."
+        "이미지 크기는 4MB 이하여야 합니다."
       );
     });
   });
@@ -603,6 +603,257 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
         expect(screen.getByText("AI 정밀 분석")).toBeInTheDocument();
       });
       expect(screen.queryByText("대략적 추정값")).not.toBeInTheDocument();
+    });
+  });
+
+  describe("9. Gemini 연동 점검·복구·속도 개선 및 안정성 검증", () => {
+    const validPng =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const testSecretKey = "TEST_SECRET_KEY_987654";
+
+    it("(a) 404 → 폴백 모델 재시도 성공", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+      const fetchSpy = vi.spyOn(globalThis, "fetch")
+        // 1차: 주 모델 (gemini-3.8-flash) 404
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          clone: () => ({
+            text: async () => JSON.stringify({ error: { message: "models/gemini-3.8-flash is not found" } }),
+          }),
+          text: async () => JSON.stringify({ error: { message: "models/gemini-3.8-flash is not found" } }),
+        } as any)
+        // 2차: 폴백 모델 (gemini-2.5-flash) 200 성공
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        name: "폴백 김치찌개",
+                        quantity: 1,
+                        unit: "인분",
+                        unitKcal: 450,
+                        unitCarb: 25,
+                        unitProtein: 28,
+                        unitFat: 20,
+                        description: "폴백 모델로 분석 성공",
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        } as any);
+
+      const res = await analyzeMealPhotoHandler({ image: validPng });
+      expect(res.source).toBe("ai");
+      expect(res.name).toBe("폴백 김치찌개");
+      expect(res.totalKcal).toBe(450);
+
+      // 1차 주 모델 호출 후 2차 폴백 모델 호출 확인
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const [url1] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      const [url2] = fetchSpy.mock.calls[1] as [string, RequestInit];
+      expect(url1).toContain("gemini-3.8-flash");
+      expect(url2).toContain("gemini-2.5-flash");
+    });
+
+    it("(b) 폴백도 실패 시 ERR_MODEL_UNAVAILABLE, 로그에 키 없음", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+      const logSpy = vi.spyOn(console, "log");
+
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          clone: () => ({ text: async () => "Not Found" }),
+          text: async () => "Not Found",
+        } as any)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          clone: () => ({ text: async () => "Not Found" }),
+          text: async () => "Not Found",
+        } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "[ERR_MODEL_UNAVAILABLE]"
+      );
+
+      // 콘솔 로그 확인: 키는 절대 없고 status, model, duration만 기록
+      const allLogs = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(allLogs).not.toContain(testSecretKey);
+      expect(allLogs).toContain("status=404 model=gemini-3.8-flash");
+      expect(allLogs).toContain("status=404 model=gemini-2.5-flash");
+    });
+
+    it("(c) 429 및 500 처리 검증", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+
+      // 1) 429 Rate Limit
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 429,
+        statusText: "Too Many Requests",
+      } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "[ERR_RATE_LIMIT]"
+      );
+
+      // 2) 500 Upstream Fail
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: false,
+        status: 500,
+        statusText: "Internal Server Error",
+      } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "[ERR_UPSTREAM_FAIL]"
+      );
+    });
+
+    it("(d) 스키마 응답 파싱과 서버의 source 및 isEstimate 부여", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+
+      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    // 모델이 source나 isEstimate를 전혀 주지 않음
+                    text: JSON.stringify({
+                      name: "현미밥과 두부",
+                      quantity: 2,
+                      unit: "공기",
+                      unitKcal: 320,
+                      unitCarb: 65,
+                      unitProtein: 15,
+                      unitFat: 3,
+                      description: "영양 만점 식단",
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as any);
+
+      const res = await analyzeMealPhotoHandler({ image: validPng });
+      // 서버가 직접 source와 isEstimate 부여
+      expect(res.source).toBe("ai");
+      expect(res.isEstimate).toBe(false);
+      expect(res.quantity).toBe(2);
+      expect(res.unitKcal).toBe(320);
+      expect(res.totalKcal).toBe(640);
+      expect(res.unitCarb).toBe(65);
+      expect(res.unitProtein).toBe(15);
+      expect(res.unitFat).toBe(3);
+    });
+
+    it("(e) 4MB 초과 거부 [ERR_PAYLOAD_TOO_LARGE]", () => {
+      // 4MB = 4,194,304 bytes. 약 5.7MB 생성
+      const hugeBase64 = "X".repeat(5700000);
+      const hugeDataUrl = `data:image/jpeg;base64,${hugeBase64}`;
+      expect(() => validateImagePayload(hugeDataUrl)).toThrow("[ERR_PAYLOAD_TOO_LARGE]");
+    });
+
+    it("(f) 요청 본문에 thinking 설정 포함 및 키는 헤더에만 있고 URL에는 없음", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+
+      // 1) 3.x 기본 모델 (gemini-3.8-flash) -> thinkingLevel: "minimal"
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      name: "샐러드",
+                      quantity: 1,
+                      unit: "그릇",
+                      unitKcal: 150,
+                      unitCarb: 10,
+                      unitProtein: 5,
+                      unitFat: 8,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as any);
+
+      await analyzeMealPhotoHandler({ image: validPng });
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      const [url1, opt1] = fetchSpy.mock.calls[0] as [string, RequestInit];
+
+      // URL에 키 없음
+      expect(url1).not.toContain("?key=");
+      expect(url1).not.toContain(testSecretKey);
+      // 헤더에만 키 존재
+      expect((opt1.headers as Record<string, string>)["x-goog-api-key"]).toBe(testSecretKey);
+
+      // 요청 본문에 thinkingLevel: "minimal" 및 responseSchema 확인
+      const body1 = JSON.parse(opt1.body as string);
+      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "minimal" });
+      expect(body1.generationConfig.responseSchema).toBeDefined();
+      expect(body1.generationConfig.responseSchema.properties.name).toBeDefined();
+
+      fetchSpy.mockRestore();
+
+      // 2) 2.x 모델 (gemini-2.5-flash) 명시 시 -> thinkingBudget: 0
+      process.env["GEMINI_MODEL"] = "gemini-2.5-flash";
+      const fetchSpy2 = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      name: "계란",
+                      quantity: 1,
+                      unit: "개",
+                      unitKcal: 80,
+                      unitCarb: 1,
+                      unitProtein: 7,
+                      unitFat: 5,
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as any);
+
+      await analyzeMealPhotoHandler({ image: validPng });
+      expect(fetchSpy2).toHaveBeenCalledTimes(1);
+      const [url2, opt2] = fetchSpy2.mock.calls[0] as [string, RequestInit];
+      expect(url2).toContain("gemini-2.5-flash");
+      const body2 = JSON.parse(opt2.body as string);
+      expect(body2.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
     });
   });
 });
