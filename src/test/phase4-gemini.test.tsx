@@ -624,7 +624,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
           }),
           text: async () => JSON.stringify({ error: { message: "models/gemini-3.8-flash is not found" } }),
         } as any)
-        // 2차: 폴백 모델 (gemini-2.5-flash) 200 성공
+        // 2차: 폴백 모델 (gemini-3.5-flash) 200 성공
         .mockResolvedValueOnce({
           ok: true,
           status: 200,
@@ -662,7 +662,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       const [url1] = fetchSpy.mock.calls[0] as [string, RequestInit];
       const [url2] = fetchSpy.mock.calls[1] as [string, RequestInit];
       expect(url1).toContain("gemini-3.8-flash");
-      expect(url2).toContain("gemini-2.5-flash");
+      expect(url2).toContain("gemini-3.5-flash");
     });
 
     it("(b) 폴백도 실패 시 ERR_MODEL_UNAVAILABLE, 로그에 키 없음", async () => {
@@ -693,7 +693,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       const allLogs = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
       expect(allLogs).not.toContain(testSecretKey);
       expect(allLogs).toContain("status=404 model=gemini-3.8-flash");
-      expect(allLogs).toContain("status=404 model=gemini-2.5-flash");
+      expect(allLogs).toContain("status=404 model=gemini-3.5-flash");
     });
 
     it("(c) 429 및 500 처리 검증", async () => {
@@ -775,7 +775,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
     it("(f) 요청 본문에 thinking 설정 포함 및 키는 헤더에만 있고 URL에는 없음", async () => {
       process.env["GEMINI_API_KEY"] = testSecretKey;
 
-      // 1) 3.x 기본 모델 (gemini-3.8-flash) -> thinkingLevel: "minimal"
+      // 1) 3.x 기본 모델 (gemini-3.8-flash) -> thinkingLevel: "low"
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -812,9 +812,9 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       // 헤더에만 키 존재
       expect((opt1.headers as Record<string, string>)["x-goog-api-key"]).toBe(testSecretKey);
 
-      // 요청 본문에 thinkingLevel: "minimal" 및 responseSchema 확인
+      // 요청 본문에 thinkingLevel: "low" 및 responseSchema 확인
       const body1 = JSON.parse(opt1.body as string);
-      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "minimal" });
+      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
       expect(body1.generationConfig.responseSchema).toBeDefined();
       expect(body1.generationConfig.responseSchema.properties.name).toBeDefined();
 

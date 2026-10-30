@@ -36,7 +36,7 @@ export interface ExerciseVisionResult {
 // 1. 모델·타임아웃·크기 관련 상수 (한 곳에서 일원화 관리)
 // ==========================================
 export const DEFAULT_GEMINI_MODEL = "gemini-3.8-flash";
-export const DEFAULT_GEMINI_MODEL_FALLBACK = "gemini-2.5-flash";
+export const DEFAULT_GEMINI_MODEL_FALLBACK = "gemini-3.5-flash";
 export const SERVER_GEMINI_TIMEOUT_MS = 20000; // 20초 (서버 -> Gemini)
 export const CLIENT_GEMINI_TIMEOUT_MS = 25000; // 25초 (클라이언트 대기 상한)
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB (Vercel 4.5MB 상한 준수)
@@ -80,7 +80,7 @@ export function buildThinkingConfig(model: string, customLevel?: string) {
   if (model.startsWith("gemini-2.")) {
     return { thinkingBudget: 0 };
   }
-  const level = (customLevel || "minimal").toLowerCase();
+  const level = (customLevel || "low").toLowerCase();
   return { thinkingLevel: level };
 }
 
