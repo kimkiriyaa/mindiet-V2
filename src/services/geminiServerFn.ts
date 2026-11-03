@@ -37,8 +37,8 @@ export interface ExerciseVisionResult {
 // ==========================================
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 export const DEFAULT_GEMINI_MODEL_FALLBACK = "gemini-3.5-flash";
-export const SERVER_GEMINI_TIMEOUT_MS = 15000; // 15초 (실측 정상 응답 ~1-3s 기준, 25초 이내 상한)
-export const CLIENT_GEMINI_TIMEOUT_MS = 20000; // 20초 (클라이언트 대기 상한, 30초 이내 상한)
+export const SERVER_GEMINI_TIMEOUT_MS = 25000; // 25초 (서버 -> Gemini 상한)
+export const CLIENT_GEMINI_TIMEOUT_MS = 30000; // 30초 (클라이언트 대기 상한)
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB (Vercel 4.5MB 상한 준수)
 
 export const STANDARD_PORTION_PROMPT =
@@ -202,6 +202,7 @@ export async function callGeminiWithFallback(params: {
 
     let isUnavailable = res.status === 404 || res.status === 410;
     let isRateLimit = res.status === 429;
+    let isServerError = [500, 502, 503, 504].includes(res.status);
     let isMaxTokens = false;
     let json: any = undefined;
 
@@ -227,15 +228,15 @@ export async function callGeminiWithFallback(params: {
       }
     }
 
-    return { res, modelId, json, isUnavailable, isRateLimit, isMaxTokens };
+    return { res, modelId, json, isUnavailable, isRateLimit, isServerError, isMaxTokens };
   };
 
   // 1차 시도 (주 모델)
   let attempt = await tryCall(primaryModel);
 
-  const shouldFallback = attempt.isUnavailable || attempt.isRateLimit || attempt.isMaxTokens;
+  const shouldFallback = attempt.isUnavailable || attempt.isRateLimit || attempt.isServerError || attempt.isMaxTokens;
 
-  // 폴백 조건 충족 시(404/410/미지원, 429 한도 초과, MAX_TOKENS 잘림) 폴백 모델로 1회 재시도
+  // 폴백 조건 충족 시(404/410/미지원, 429 한도 초과, 500/502/503/504 서버 오류, MAX_TOKENS 잘림) 폴백 모델로 1회 재시도
   if (shouldFallback && fallbackModel && fallbackModel !== primaryModel) {
     attempt = await tryCall(fallbackModel);
   }

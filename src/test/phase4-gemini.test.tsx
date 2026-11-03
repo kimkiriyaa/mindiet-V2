@@ -390,7 +390,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
 
     it("(b) HTTP 500 에러: 던져진 예외 메시지에 API 키나 원본 응답 본문이 없고 표준 한글 메시지만 노출", async () => {
       process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
-      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      vi.spyOn(globalThis, "fetch").mockResolvedValue({
         ok: false,
         status: 500,
         statusText: "Internal Server Crash",
@@ -753,13 +753,61 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
         "[ERR_RATE_LIMIT]"
       );
+    });
 
-      // 3) 500 Upstream Fail (폴백 없이 즉시 에러 마스킹)
-      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-        ok: false,
-        status: 500,
-        statusText: "Internal Server Error",
-      } as any);
+    it("(c-1) 503/5xx 서버 오류 시 폴백 모델 재시도 및 양쪽 실패 시 ERR_UPSTREAM_FAIL", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+
+      // 1) 1차 모델 503 (Service Unavailable) -> 2차 폴백 모델 재시도 200 성공
+      const fetchSpy503 = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+        } as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        name: "503 폴백 성공 비빔밥",
+                        quantity: 1,
+                        unit: "그릇",
+                        unitKcal: 550,
+                        unitCarb: 70,
+                        unitProtein: 20,
+                        unitFat: 15,
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        } as any);
+
+      const res503 = await analyzeMealPhotoHandler({ image: validPng });
+      expect(res503.name).toBe("503 폴백 성공 비빔밥");
+      expect(fetchSpy503).toHaveBeenCalledTimes(2);
+      fetchSpy503.mockRestore();
+
+      // 2) 503 + 503 (양쪽 모두 503 실패) -> [ERR_UPSTREAM_FAIL] 에러 마스킹
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+        } as any)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+        } as any);
 
       await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
         "[ERR_UPSTREAM_FAIL]"
