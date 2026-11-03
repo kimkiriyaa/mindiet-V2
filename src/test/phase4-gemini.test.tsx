@@ -978,7 +978,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
 
       // 요청 본문에 thinkingLevel: "minimal" 및 3.x temperature 미설정 확인
       const body1 = JSON.parse(opt1.body as string);
-      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "minimal" });
+      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
       expect(body1.generationConfig.temperature).toBeUndefined();
       expect(body1.generationConfig.responseSchema).toBeDefined();
       expect(body1.generationConfig.responseSchema.properties.name).toBeDefined();
@@ -1018,8 +1018,85 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       const [url2, opt2] = fetchSpy2.mock.calls[0] as [string, RequestInit];
       expect(url2).toContain("gemini-2.5-flash");
       const body2 = JSON.parse(opt2.body as string);
-      expect(body2.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
+            expect(body2.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
       expect(body2.generationConfig.temperature).toBe(0.1);
+    });
+
+    it("(g) 총 마감 시간(24초) 예산 관리: 주 모델 지연 + 폴백 지연이 총 마감을 넘지 않는지 검증 (fake timers)", async () => {
+      vi.useFakeTimers();
+      try {
+        process.env["GEMINI_API_KEY"] = testSecretKey;
+
+        // 1) 주 모델 12초 타임아웃 지연 -> 남은 시간 예산 내에서 폴백 모델로 1회 재시도하여 성공
+        let callCount = 0;
+        const fetchSpy1 = vi.spyOn(globalThis, "fetch").mockImplementation((_url: any, opt: any) => {
+          callCount++;
+          if (callCount === 1) {
+            // 주 모델: 응답 없이 대기 (12초 후 AbortError 트리거)
+            return new Promise((_resolve, reject) => {
+              opt?.signal?.addEventListener("abort", () => {
+                const err = new Error("The operation was aborted");
+                err.name = "AbortError";
+                reject(err);
+              });
+            });
+          } else {
+            // 2차 폴백 모델: 정상 200 응답
+            return Promise.resolve({
+              ok: true,
+              status: 200,
+              json: async () => ({
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          text: JSON.stringify({
+                            name: "폴백 성공 닭가슴살",
+                            quantity: 1,
+                            unit: "개",
+                            unitKcal: 130,
+                            unitCarb: 0,
+                            unitProtein: 25,
+                            unitFat: 2,
+                          }),
+                        },
+                      ],
+                    },
+                  },
+                ],
+              }),
+            } as any);
+          }
+        });
+
+        const reqPromise1 = analyzeMealPhotoHandler({ image: validPng });
+        // 12초 경과 -> 주 모델 타임아웃 및 폴백 모델 즉시 호출 성공
+        await vi.advanceTimersByTimeAsync(12001);
+        const result1 = await reqPromise1;
+        expect(result1.name).toBe("폴백 성공 닭가슴살");
+        expect(callCount).toBe(2);
+        fetchSpy1.mockRestore();
+
+        // 2) 주 모델 지연(12초) + 폴백 모델도 지연(12초) -> 총 24초에 [ERR_TIMEOUT] 에러 발생
+        vi.spyOn(globalThis, "fetch").mockImplementation((_url: any, opt: any) => {
+          return new Promise((_resolve, reject) => {
+            opt?.signal?.addEventListener("abort", () => {
+              const err = new Error("The operation was aborted");
+              err.name = "AbortError";
+              reject(err);
+            });
+          });
+        });
+
+        const reqPromise2 = analyzeMealPhotoHandler({ image: validPng });
+        const timeoutAssertion = expect(reqPromise2).rejects.toThrow("[ERR_TIMEOUT]");
+        // 24초 경과 -> 총 마감 타임아웃
+        await vi.advanceTimersByTimeAsync(24001);
+        await timeoutAssertion;
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 });

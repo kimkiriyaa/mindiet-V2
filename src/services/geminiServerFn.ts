@@ -37,8 +37,10 @@ export interface ExerciseVisionResult {
 // ==========================================
 export const DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 export const DEFAULT_GEMINI_MODEL_FALLBACK = "gemini-3.5-flash";
-export const SERVER_GEMINI_TIMEOUT_MS = 25000; // 25초 (서버 -> Gemini 상한)
-export const CLIENT_GEMINI_TIMEOUT_MS = 30000; // 30초 (클라이언트 대기 상한)
+export const TOTAL_GEMINI_TIMEOUT_MS = 24000; // 요청 단위 총 마감 시간 (24초)
+export const PRIMARY_GEMINI_TIMEOUT_MS = 12000; // 주 모델 최대 시도 시간 (12초)
+export const CLIENT_GEMINI_TIMEOUT_MS = 30000; // 클라이언트 대기 상한 (총 마감 24초보다 긴 30초 유지)
+export const SERVER_GEMINI_TIMEOUT_MS = TOTAL_GEMINI_TIMEOUT_MS; // 이전 호환성 유지용 (24초)
 export const MAX_IMAGE_BYTES = 4 * 1024 * 1024; // 4MB (Vercel 4.5MB 상한 준수)
 
 export const STANDARD_PORTION_PROMPT =
@@ -80,7 +82,7 @@ export function buildThinkingConfig(model: string, customLevel?: string) {
   if (model.startsWith("gemini-2.")) {
     return { thinkingBudget: 0 };
   }
-  const level = (customLevel || "minimal").toLowerCase();
+  const level = (customLevel || "low").toLowerCase();
   return { thinkingLevel: level };
 }
 
@@ -158,7 +160,22 @@ export async function callGeminiWithFallback(params: {
   const fallbackModel = env.GEMINI_MODEL_FALLBACK || DEFAULT_GEMINI_MODEL_FALLBACK;
   const thinkingLevel = env.GEMINI_THINKING_LEVEL;
 
-  const tryCall = async (modelId: string) => {
+  const overallDeadline = Date.now() + TOTAL_GEMINI_TIMEOUT_MS;
+
+  const tryCall = async (modelId: string, timeoutMs: number) => {
+    if (timeoutMs <= 0) {
+      return {
+        res: null as any,
+        modelId,
+        json: undefined,
+        isUnavailable: false,
+        isRateLimit: false,
+        isServerError: false,
+        isMaxTokens: false,
+        isTimeout: true,
+      };
+    }
+
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent`;
     const generationConfig: Record<string, any> = {
       maxOutputTokens: params.maxOutputTokens,
@@ -189,10 +206,23 @@ export async function callGeminiWithFallback(params: {
           },
           body: JSON.stringify(requestBody),
         },
-        SERVER_GEMINI_TIMEOUT_MS
+        timeoutMs
       );
-    } catch (fetchErr) {
+    } catch (fetchErr: any) {
       const durationMs = Date.now() - startTime;
+      if (fetchErr?.message?.includes("[ERR_TIMEOUT]")) {
+        console.log(`[geminiServerFn] status=TIMEOUT model=${modelId} duration=${durationMs}ms`);
+        return {
+          res: null as any,
+          modelId,
+          json: undefined,
+          isUnavailable: false,
+          isRateLimit: false,
+          isServerError: false,
+          isMaxTokens: false,
+          isTimeout: true,
+        };
+      }
       console.log(`[geminiServerFn] status=NETWORK_ERROR model=${modelId} duration=${durationMs}ms`);
       throw fetchErr;
     }
@@ -224,21 +254,38 @@ export async function callGeminiWithFallback(params: {
           isMaxTokens = true;
         }
       } catch {
-        // ignore
+        // JSON 파싱 실패 시 아래에서 에러 처리
       }
     }
 
-    return { res, modelId, json, isUnavailable, isRateLimit, isServerError, isMaxTokens };
+    return { res, modelId, json, isUnavailable, isRateLimit, isServerError, isMaxTokens, isTimeout: false };
   };
 
-  // 1차 시도 (주 모델)
-  let attempt = await tryCall(primaryModel);
+  // 1차 시도 (주 모델): 최대 12초, 남은 마감 시간 이내
+  const remainingForPrimary = overallDeadline - Date.now();
+  const primaryTimeoutMs = Math.min(PRIMARY_GEMINI_TIMEOUT_MS, remainingForPrimary);
+  let attempt = await tryCall(primaryModel, primaryTimeoutMs);
 
-  const shouldFallback = attempt.isUnavailable || attempt.isRateLimit || attempt.isServerError || attempt.isMaxTokens;
+  const shouldFallback =
+    attempt.isTimeout ||
+    attempt.isUnavailable ||
+    attempt.isRateLimit ||
+    attempt.isServerError ||
+    attempt.isMaxTokens;
 
-  // 폴백 조건 충족 시(404/410/미지원, 429 한도 초과, 500/502/503/504 서버 오류, MAX_TOKENS 잘림) 폴백 모델로 1회 재시도
+  // 폴백 조건 충족 시(타임아웃, 404/410/미지원, 429 한도 초과, 500/502/503/504 서버 오류, MAX_TOKENS 잘림) 남은 시간 예산 내에서 폴백 모델로 1회 재시도
   if (shouldFallback && fallbackModel && fallbackModel !== primaryModel) {
-    attempt = await tryCall(fallbackModel);
+    const remainingForFallback = overallDeadline - Date.now();
+    if (remainingForFallback > 0) {
+      attempt = await tryCall(fallbackModel, remainingForFallback);
+    } else {
+      attempt.isTimeout = true;
+    }
+  }
+
+  // 총 마감 시간이 지나거나 타임아웃된 경우 [ERR_TIMEOUT]
+  if (attempt.isTimeout) {
+    throw new Error(`AI 분석 서버 응답 시간이 초과되었습니다 (${Math.round(TOTAL_GEMINI_TIMEOUT_MS / 1000)}초 타임아웃). [ERR_TIMEOUT]`);
   }
 
   // 최종 결과 검증 및 에러 마스킹
@@ -251,7 +298,7 @@ export async function callGeminiWithFallback(params: {
   if (attempt.isMaxTokens) {
     throw new Error("식단 분석 토큰 한도를 초과했습니다. [ERR_MAX_TOKENS]");
   }
-  if (!attempt.res.ok) {
+  if (!attempt.res || !attempt.res.ok) {
     throw new Error("식단 분석에 실패했습니다. 다시 시도해 주세요. [ERR_UPSTREAM_FAIL]");
   }
 
@@ -264,7 +311,7 @@ export async function callGeminiWithFallback(params: {
     }
   }
 
-  const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
+    const candidateText = json?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!candidateText) {
     throw new Error("식단 분석 결과를 전달받지 못했습니다. [ERR_EMPTY_RESPONSE]");
   }
