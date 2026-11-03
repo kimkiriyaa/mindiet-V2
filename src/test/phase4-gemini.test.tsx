@@ -413,7 +413,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
 
     it("(c) HTTP 429 에러: [ERR_RATE_LIMIT] 에러 코드가 정상 반환", async () => {
       process.env["GEMINI_API_KEY"] = "SECURE_TEST_KEY_456";
-      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      vi.spyOn(globalThis, "fetch").mockResolvedValue({
         ok: false,
         status: 429,
         statusText: "Too Many Requests",
@@ -614,15 +614,15 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
     it("(a) 404 → 폴백 모델 재시도 성공", async () => {
       process.env["GEMINI_API_KEY"] = testSecretKey;
       const fetchSpy = vi.spyOn(globalThis, "fetch")
-        // 1차: 주 모델 (gemini-3.8-flash) 404
+        // 1차: 주 모델 (gemini-3.5-flash-lite) 404
         .mockResolvedValueOnce({
           ok: false,
           status: 404,
           statusText: "Not Found",
           clone: () => ({
-            text: async () => JSON.stringify({ error: { message: "models/gemini-3.8-flash is not found" } }),
+            text: async () => JSON.stringify({ error: { message: "models/gemini-3.5-flash-lite is not found" } }),
           }),
-          text: async () => JSON.stringify({ error: { message: "models/gemini-3.8-flash is not found" } }),
+          text: async () => JSON.stringify({ error: { message: "models/gemini-3.5-flash-lite is not found" } }),
         } as any)
         // 2차: 폴백 모델 (gemini-3.5-flash) 200 성공
         .mockResolvedValueOnce({
@@ -661,7 +661,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(fetchSpy).toHaveBeenCalledTimes(2);
       const [url1] = fetchSpy.mock.calls[0] as [string, RequestInit];
       const [url2] = fetchSpy.mock.calls[1] as [string, RequestInit];
-      expect(url1).toContain("gemini-3.8-flash");
+      expect(url1).toContain("gemini-3.5-flash-lite");
       expect(url2).toContain("gemini-3.5-flash");
     });
 
@@ -692,25 +692,69 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       // 콘솔 로그 확인: 키는 절대 없고 status, model, duration만 기록
       const allLogs = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
       expect(allLogs).not.toContain(testSecretKey);
-      expect(allLogs).toContain("status=404 model=gemini-3.8-flash");
+      expect(allLogs).toContain("status=404 model=gemini-3.5-flash-lite");
       expect(allLogs).toContain("status=404 model=gemini-3.5-flash");
     });
 
-    it("(c) 429 및 500 처리 검증", async () => {
+    it("(c) 429 폴백 재시도 및 500 처리 검증", async () => {
       process.env["GEMINI_API_KEY"] = testSecretKey;
 
-      // 1) 429 Rate Limit
-      vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
-        ok: false,
-        status: 429,
-        statusText: "Too Many Requests",
-      } as any);
+      // 1) 429 발생 시 폴백 모델로 1회 재시도하여 성공하는 케이스
+      const fetchSpy429 = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: "Too Many Requests",
+        } as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        name: "재시도 성공 샐러드",
+                        quantity: 1,
+                        unit: "접시",
+                        unitKcal: 200,
+                        unitCarb: 15,
+                        unitProtein: 10,
+                        unitFat: 5,
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        } as any);
+
+      const res429 = await analyzeMealPhotoHandler({ image: validPng });
+      expect(res429.name).toBe("재시도 성공 샐러드");
+      expect(fetchSpy429).toHaveBeenCalledTimes(2);
+      fetchSpy429.mockRestore();
+
+      // 2) 폴백 모델까지 모두 429인 경우 [ERR_RATE_LIMIT]
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: "Too Many Requests",
+        } as any)
+        .mockResolvedValueOnce({
+          ok: false,
+          status: 429,
+          statusText: "Too Many Requests",
+        } as any);
 
       await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
         "[ERR_RATE_LIMIT]"
       );
 
-      // 2) 500 Upstream Fail
+      // 3) 500 Upstream Fail (폴백 없이 즉시 에러 마스킹)
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: false,
         status: 500,
@@ -719,6 +763,77 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
 
       await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
         "[ERR_UPSTREAM_FAIL]"
+      );
+    });
+
+    it("(c-2) MAX_TOKENS finishReason 발생 시 폴백 모델로 1회 재시도 및 한도 초과 처리", async () => {
+      process.env["GEMINI_API_KEY"] = testSecretKey;
+
+      // 1) 1차 모델 MAX_TOKENS 잘림 -> 2차 폴백 모델 재시도 성공
+      const fetchSpyMax = vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                finishReason: "MAX_TOKENS",
+                content: { parts: [{ text: "{\"name\":\"잘린응답" }] },
+              },
+            ],
+          }),
+        } as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [
+              {
+                finishReason: "STOP",
+                content: {
+                  parts: [
+                    {
+                      text: JSON.stringify({
+                        name: "완전한 식단",
+                        quantity: 1,
+                        unit: "인분",
+                        unitKcal: 350,
+                        unitCarb: 40,
+                        unitProtein: 20,
+                        unitFat: 10,
+                      }),
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        } as any);
+
+      const resMax = await analyzeMealPhotoHandler({ image: validPng });
+      expect(resMax.name).toBe("완전한 식단");
+      expect(fetchSpyMax).toHaveBeenCalledTimes(2);
+      fetchSpyMax.mockRestore();
+
+      // 2) 폴백 모델까지 모두 MAX_TOKENS인 경우 [ERR_MAX_TOKENS]
+      vi.spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ finishReason: "MAX_TOKENS" }],
+          }),
+        } as any)
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({
+            candidates: [{ finishReason: "MAX_TOKENS" }],
+          }),
+        } as any);
+
+      await expect(analyzeMealPhotoHandler({ image: validPng })).rejects.toThrow(
+        "[ERR_MAX_TOKENS]"
       );
     });
 
@@ -772,10 +887,10 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(() => validateImagePayload(hugeDataUrl)).toThrow("[ERR_PAYLOAD_TOO_LARGE]");
     });
 
-    it("(f) 요청 본문에 thinking 설정 포함 및 키는 헤더에만 있고 URL에는 없음", async () => {
+    it("(f) 요청 본문에 thinking 설정 포함, 3.x temperature 미전송 및 2.x temperature 0.1 전송", async () => {
       process.env["GEMINI_API_KEY"] = testSecretKey;
 
-      // 1) 3.x 기본 모델 (gemini-3.8-flash) -> thinkingLevel: "low"
+      // 1) 3.x 기본 모델 (gemini-3.5-flash-lite) -> thinkingLevel: "minimal", temperature 미설정
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: true,
         status: 200,
@@ -806,21 +921,23 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(fetchSpy).toHaveBeenCalledTimes(1);
       const [url1, opt1] = fetchSpy.mock.calls[0] as [string, RequestInit];
 
-      // URL에 키 없음
+      // URL에 키 없음 및 주 모델명 확인
+      expect(url1).toContain("gemini-3.5-flash-lite");
       expect(url1).not.toContain("?key=");
       expect(url1).not.toContain(testSecretKey);
       // 헤더에만 키 존재
       expect((opt1.headers as Record<string, string>)["x-goog-api-key"]).toBe(testSecretKey);
 
-      // 요청 본문에 thinkingLevel: "low" 및 responseSchema 확인
+      // 요청 본문에 thinkingLevel: "minimal" 및 3.x temperature 미설정 확인
       const body1 = JSON.parse(opt1.body as string);
-      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
+      expect(body1.generationConfig.thinkingConfig).toEqual({ thinkingLevel: "minimal" });
+      expect(body1.generationConfig.temperature).toBeUndefined();
       expect(body1.generationConfig.responseSchema).toBeDefined();
       expect(body1.generationConfig.responseSchema.properties.name).toBeDefined();
 
       fetchSpy.mockRestore();
 
-      // 2) 2.x 모델 (gemini-2.5-flash) 명시 시 -> thinkingBudget: 0
+      // 2) 2.x 모델 (gemini-2.5-flash) 명시 시 -> thinkingBudget: 0, temperature: 0.1
       process.env["GEMINI_MODEL"] = "gemini-2.5-flash";
       const fetchSpy2 = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
         ok: true,
@@ -854,6 +971,7 @@ describe("Phase 4: Gemini 서버 함수 및 클라이언트 AI 연동 정밀 검
       expect(url2).toContain("gemini-2.5-flash");
       const body2 = JSON.parse(opt2.body as string);
       expect(body2.generationConfig.thinkingConfig).toEqual({ thinkingBudget: 0 });
+      expect(body2.generationConfig.temperature).toBe(0.1);
     });
   });
 });
